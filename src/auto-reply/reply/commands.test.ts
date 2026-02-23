@@ -1418,4 +1418,54 @@ describe("handleCommands /tts", () => {
     expect(result.shouldContinue).toBe(false);
     expect(result.reply?.text).toContain("TTS status");
   });
+
+  it("accepts qwen3-fastapi provider selection and reports it in status", async () => {
+    const prefsPath = path.join(testWorkspaceDir, "tts-qwen-provider.json");
+    const cfg = {
+      commands: { text: true },
+      channels: { whatsapp: { allowFrom: ["*"] } },
+      messages: {
+        tts: {
+          prefsPath,
+          qwen3Fastapi: {
+            apiKey: "qwen-key",
+            baseUrl: "http://127.0.0.1:8000/v1",
+            model: "qwen3-tts",
+            voice: "Chelsie",
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    const setResult = await handleCommands(buildParams("/tts provider qwen3-fastapi", cfg));
+    expect(setResult.reply?.text).toContain("qwen3-fastapi");
+
+    const statusResult = await handleCommands(buildParams("/tts status", cfg));
+    expect(statusResult.reply?.text).toContain("Provider: qwen3-fastapi");
+  });
+
+  it("includes qwen provider details in provider/help output", async () => {
+    const cfg = {
+      commands: { text: true },
+      channels: { whatsapp: { allowFrom: ["*"] } },
+      messages: {
+        tts: {
+          prefsPath: path.join(testWorkspaceDir, "tts-qwen-provider-view.json"),
+          qwen3Fastapi: {
+            apiKey: "qwen-key",
+            baseUrl: "http://127.0.0.1:8000/v1",
+            model: "qwen3-tts",
+            voice: "Chelsie",
+          },
+        },
+      },
+    } as OpenClawConfig;
+
+    const providerResult = await handleCommands(buildParams("/tts provider", cfg));
+    expect(providerResult.reply?.text).toContain("Qwen key: ✅");
+    expect(providerResult.reply?.text).toContain("qwen3-fastapi");
+
+    const helpResult = await handleCommands(buildParams("/tts help", cfg));
+    expect(helpResult.reply?.text).toContain("qwen3-fastapi");
+  });
 });

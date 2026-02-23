@@ -1,4 +1,5 @@
 import { rmSync } from "node:fs";
+import { Readable } from "node:stream";
 import { completeSimple, type TextContent } from "@mariozechner/pi-ai";
 import { EdgeTTS } from "node-edge-tts";
 import { getApiKeyForModel, requireApiKey } from "../agents/model-auth.js";
@@ -55,6 +56,29 @@ function normalizeLanguageCode(code?: string): string | undefined {
     throw new Error("languageCode must be a 2-letter ISO 639-1 code (e.g. en, de, fr)");
   }
   return normalized;
+}
+
+function normalizeQwenLanguage(code?: string): string | undefined {
+  const trimmed = code?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const normalized = trimmed.toLowerCase();
+  const isoToQwenLanguage: Record<string, string> = {
+    en: "english",
+    de: "german",
+    fr: "french",
+    es: "spanish",
+    it: "italian",
+    pt: "portuguese",
+    ru: "russian",
+    zh: "chinese",
+    ja: "japanese",
+    ko: "korean",
+    ar: "arabic",
+    hi: "hindi",
+  };
+  return isoToQwenLanguage[normalized] ?? normalized;
 }
 
 function normalizeApplyTextNormalization(mode?: string): "auto" | "on" | "off" | undefined {
@@ -122,6 +146,32 @@ export function parseTtsDirectives(
   cleanedText = cleanedText.replace(directiveRegex, (_match, body: string) => {
     hasDirective = true;
     const tokens = body.split(/\s+/).filter(Boolean);
+    const directiveProviderHint = (() => {
+      if (!policy.allowProvider) {
+        return overrides.provider;
+      }
+      for (const token of tokens) {
+        const eqIndex = token.indexOf("=");
+        if (eqIndex === -1) {
+          continue;
+        }
+        const rawKey = token.slice(0, eqIndex).trim().toLowerCase();
+        const rawValue = token.slice(eqIndex + 1).trim();
+        if (rawKey !== "provider") {
+          continue;
+        }
+        if (
+          rawValue === "openai" ||
+          rawValue === "elevenlabs" ||
+          rawValue === "qwen3-fastapi" ||
+          rawValue === "edge"
+        ) {
+          return rawValue;
+        }
+      }
+      return overrides.provider;
+    })();
+
     for (const token of tokens) {
       const eqIndex = token.indexOf("=");
       if (eqIndex === -1) {
@@ -139,7 +189,12 @@ export function parseTtsDirectives(
             if (!policy.allowProvider) {
               break;
             }
-            if (rawValue === "openai" || rawValue === "elevenlabs" || rawValue === "edge") {
+            if (
+              rawValue === "openai" ||
+              rawValue === "elevenlabs" ||
+              rawValue === "qwen3-fastapi" ||
+              rawValue === "edge"
+            ) {
               overrides.provider = rawValue;
             } else {
               warnings.push(`unsupported provider "${rawValue}"`);
@@ -151,11 +206,24 @@ export function parseTtsDirectives(
             if (!policy.allowVoice) {
               break;
             }
+            if (directiveProviderHint === "qwen3-fastapi") {
+              overrides.qwen3Fastapi = { ...overrides.qwen3Fastapi, voice: rawValue };
+              break;
+            }
             if (isValidOpenAIVoice(rawValue)) {
               overrides.openai = { ...overrides.openai, voice: rawValue };
             } else {
               warnings.push(`invalid OpenAI voice "${rawValue}"`);
             }
+            break;
+          case "qwen_voice":
+          case "qwenvoice":
+          case "qwen3fastapi_voice":
+          case "qwen3_fastapi_voice":
+            if (!policy.allowVoice) {
+              break;
+            }
+            overrides.qwen3Fastapi = { ...overrides.qwen3Fastapi, voice: rawValue };
             break;
           case "voiceid":
           case "voice_id":
@@ -177,7 +245,14 @@ export function parseTtsDirectives(
           case "elevenlabsmodel":
           case "openai_model":
           case "openaimodel":
+          case "qwen_model":
+          case "qwen3fastapi_model":
+          case "qwen3_fastapi_model":
             if (!policy.allowModelId) {
+              break;
+            }
+            if (directiveProviderHint === "qwen3-fastapi") {
+              overrides.qwen3Fastapi = { ...overrides.qwen3Fastapi, model: rawValue };
               break;
             }
             if (isValidOpenAIModel(rawValue)) {
@@ -292,6 +367,13 @@ export function parseTtsDirectives(
             if (!policy.allowNormalization) {
               break;
             }
+            if (directiveProviderHint === "qwen3-fastapi") {
+              overrides.qwen3Fastapi = {
+                ...overrides.qwen3Fastapi,
+                language: normalizeQwenLanguage(rawValue),
+              };
+              break;
+            }
             overrides.elevenlabs = {
               ...overrides.elevenlabs,
               languageCode: normalizeLanguageCode(rawValue),
@@ -305,6 +387,37 @@ export function parseTtsDirectives(
               ...overrides.elevenlabs,
               seed: normalizeSeed(Number.parseInt(rawValue, 10)),
             };
+            break;
+          case "instructions":
+          case "instruction":
+          case "instruct":
+          case "openai_instructions":
+          case "openaiinstructions":
+            if (!policy.allowInstructions) {
+              break;
+            }
+            overrides.qwen3Fastapi = {
+              ...overrides.qwen3Fastapi,
+              instructions: rawValue,
+            };
+            break;
+          case "stream":
+          case "openai_stream":
+          case "openaistream":
+            if (!policy.allowStream) {
+              break;
+            }
+            {
+              const value = parseBooleanValue(rawValue);
+              if (value == null) {
+                warnings.push("invalid stream value");
+                break;
+              }
+              overrides.qwen3Fastapi = {
+                ...overrides.qwen3Fastapi,
+                stream: value,
+              };
+            }
             break;
           default:
             break;
@@ -593,10 +706,12 @@ export async function openaiTTS(params: {
   apiKey: string;
   model: string;
   voice: string;
+  instructions?: string;
+  stream?: boolean;
   responseFormat: "mp3" | "opus" | "pcm";
   timeoutMs: number;
 }): Promise<Buffer> {
-  const { text, apiKey, model, voice, responseFormat, timeoutMs } = params;
+  const { text, apiKey, model, voice, instructions, stream, responseFormat, timeoutMs } = params;
 
   if (!isValidOpenAIModel(model)) {
     throw new Error(`Invalid model: ${model}`);
@@ -605,10 +720,69 @@ export async function openaiTTS(params: {
     throw new Error(`Invalid voice: ${voice}`);
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const requestBuffer = async (streamMode: boolean): Promise<Buffer> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`${getOpenAITtsBaseUrl()}/audio/speech`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          input: text,
+          voice,
+          response_format: responseFormat,
+          ...(instructions ? { instructions } : {}),
+          ...(streamMode ? { stream: true } : {}),
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`OpenAI TTS API error (${response.status})`);
+      }
+
+      return Buffer.from(await response.arrayBuffer());
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  if (!stream) {
+    return requestBuffer(false);
+  }
 
   try {
+    return await requestBuffer(true);
+  } catch {
+    return requestBuffer(false);
+  }
+}
+
+export async function openaiTTSReadable(params: {
+  text: string;
+  apiKey: string;
+  model: string;
+  voice: string;
+  instructions?: string;
+  responseFormat: "mp3" | "opus" | "pcm";
+  timeoutMs: number;
+}): Promise<{ stream: Readable; progressive: boolean }> {
+  const { text, apiKey, model, voice, instructions, responseFormat, timeoutMs } = params;
+
+  if (!isValidOpenAIModel(model)) {
+    throw new Error(`Invalid model: ${model}`);
+  }
+  if (!isValidOpenAIVoice(voice)) {
+    throw new Error(`Invalid voice: ${voice}`);
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     const response = await fetch(`${getOpenAITtsBaseUrl()}/audio/speech`, {
       method: "POST",
       headers: {
@@ -620,17 +794,273 @@ export async function openaiTTS(params: {
         input: text,
         voice,
         response_format: responseFormat,
+        ...(instructions ? { instructions } : {}),
+        stream: true,
       }),
       signal: controller.signal,
+    }).finally(() => {
+      clearTimeout(timeout);
     });
 
     if (!response.ok) {
       throw new Error(`OpenAI TTS API error (${response.status})`);
     }
+    if (!response.body) {
+      throw new Error("OpenAI TTS stream returned no body");
+    }
+
+    return {
+      stream: Readable.fromWeb(
+        response.body as unknown as import("node:stream/web").ReadableStream,
+      ),
+      progressive: true,
+    };
+  } catch {
+    const buffered = await openaiTTS({
+      text,
+      apiKey,
+      model,
+      voice,
+      instructions,
+      stream: false,
+      responseFormat,
+      timeoutMs,
+    });
+    return {
+      stream: Readable.from(buffered),
+      progressive: false,
+    };
+  }
+}
+
+function normalizeOpenAiCompatibleBaseUrl(baseUrl: string): string {
+  const normalized = baseUrl.trim().replace(/\/+$/, "");
+  if (!normalized) {
+    throw new Error("TTS baseUrl is required");
+  }
+  return normalized;
+}
+
+type OpenAiCompatibleTtsParams = {
+  providerName: string;
+  baseUrl: string;
+  apiKey?: string;
+  text: string;
+  model: string;
+  voice: string;
+  instructions?: string;
+  language?: string;
+  responseFormat: "mp3" | "opus" | "pcm";
+  timeoutMs: number;
+};
+
+async function requestOpenAiCompatibleTtsBuffer(
+  params: OpenAiCompatibleTtsParams & { streamMode: boolean },
+): Promise<Buffer> {
+  const {
+    providerName,
+    baseUrl,
+    apiKey,
+    text,
+    model,
+    voice,
+    instructions,
+    language,
+    streamMode,
+    responseFormat,
+    timeoutMs,
+  } = params;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (apiKey?.trim()) {
+      headers.Authorization = `Bearer ${apiKey.trim()}`;
+    }
+    const response = await fetch(`${normalizeOpenAiCompatibleBaseUrl(baseUrl)}/audio/speech`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model,
+        input: text,
+        voice,
+        response_format: responseFormat,
+        ...(instructions ? { instructions } : {}),
+        ...(language ? { language: normalizeQwenLanguage(language) } : {}),
+        ...(streamMode ? { stream: true } : {}),
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`${providerName} TTS API error (${response.status})`);
+    }
 
     return Buffer.from(await response.arrayBuffer());
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+async function requestOpenAiCompatibleTtsReadable(
+  params: OpenAiCompatibleTtsParams,
+): Promise<{ stream: Readable; progressive: boolean }> {
+  const {
+    providerName,
+    baseUrl,
+    apiKey,
+    text,
+    model,
+    voice,
+    instructions,
+    language,
+    responseFormat,
+    timeoutMs,
+  } = params;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (apiKey?.trim()) {
+    headers.Authorization = `Bearer ${apiKey.trim()}`;
+  }
+  const response = await fetch(`${normalizeOpenAiCompatibleBaseUrl(baseUrl)}/audio/speech`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      model,
+      input: text,
+      voice,
+      response_format: responseFormat,
+      ...(instructions ? { instructions } : {}),
+      ...(language ? { language: normalizeQwenLanguage(language) } : {}),
+      stream: true,
+    }),
+    signal: controller.signal,
+  }).finally(() => {
+    clearTimeout(timeout);
+  });
+
+  if (!response.ok) {
+    throw new Error(`${providerName} TTS API error (${response.status})`);
+  }
+  if (!response.body) {
+    throw new Error(`${providerName} TTS stream returned no body`);
+  }
+  return {
+    stream: Readable.fromWeb(response.body as unknown as import("node:stream/web").ReadableStream),
+    progressive: true,
+  };
+}
+
+export async function qwen3FastapiTTS(params: {
+  text: string;
+  baseUrl: string;
+  apiKey?: string;
+  model: string;
+  voice: string;
+  instructions?: string;
+  language?: string;
+  stream?: boolean;
+  responseFormat: "mp3" | "opus" | "pcm";
+  timeoutMs: number;
+}): Promise<Buffer> {
+  const {
+    text,
+    baseUrl,
+    apiKey,
+    model,
+    voice,
+    instructions,
+    language,
+    stream,
+    responseFormat,
+    timeoutMs,
+  } = params;
+  if (!model.trim()) {
+    throw new Error("qwen3-fastapi model is required");
+  }
+  if (!voice.trim()) {
+    throw new Error("qwen3-fastapi voice is required");
+  }
+
+  const requestBuffer = async (streamMode: boolean): Promise<Buffer> =>
+    requestOpenAiCompatibleTtsBuffer({
+      providerName: "qwen3-fastapi",
+      baseUrl,
+      apiKey,
+      text,
+      model,
+      voice,
+      instructions,
+      language,
+      streamMode,
+      responseFormat,
+      timeoutMs,
+    });
+
+  if (!stream) {
+    return requestBuffer(false);
+  }
+  try {
+    return await requestBuffer(true);
+  } catch {
+    return requestBuffer(false);
+  }
+}
+
+export async function qwen3FastapiTTSReadable(params: {
+  text: string;
+  baseUrl: string;
+  apiKey?: string;
+  model: string;
+  voice: string;
+  instructions?: string;
+  language?: string;
+  responseFormat: "mp3" | "opus" | "pcm";
+  timeoutMs: number;
+}): Promise<{ stream: Readable; progressive: boolean }> {
+  const { text, baseUrl, apiKey, model, voice, instructions, language, responseFormat, timeoutMs } =
+    params;
+  if (!model.trim()) {
+    throw new Error("qwen3-fastapi model is required");
+  }
+  if (!voice.trim()) {
+    throw new Error("qwen3-fastapi voice is required");
+  }
+  try {
+    return await requestOpenAiCompatibleTtsReadable({
+      providerName: "qwen3-fastapi",
+      baseUrl,
+      apiKey,
+      text,
+      model,
+      voice,
+      instructions,
+      language,
+      responseFormat,
+      timeoutMs,
+    });
+  } catch {
+    const buffered = await qwen3FastapiTTS({
+      text,
+      baseUrl,
+      apiKey,
+      model,
+      voice,
+      instructions,
+      language,
+      stream: false,
+      responseFormat,
+      timeoutMs,
+    });
+    return {
+      stream: Readable.from(buffered),
+      progressive: false,
+    };
   }
 }
 

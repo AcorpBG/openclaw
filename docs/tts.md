@@ -9,13 +9,14 @@ title: "Text-to-Speech"
 
 # Text-to-speech (TTS)
 
-OpenClaw can convert outbound replies into audio using ElevenLabs, OpenAI, or Edge TTS.
+OpenClaw can convert outbound replies into audio using ElevenLabs, OpenAI, Qwen3 FastAPI, or Edge TTS.
 It works anywhere OpenClaw can send audio; Telegram gets a round voice-note bubble.
 
 ## Supported services
 
 - **ElevenLabs** (primary or fallback provider)
 - **OpenAI** (primary or fallback provider; also used for summaries)
+- **Qwen3 FastAPI** (primary or fallback provider; OpenAI-compatible `/audio/speech`)
 - **Edge TTS** (primary or fallback provider; uses `node-edge-tts`, default when no API keys)
 
 ### Edge TTS notes
@@ -36,6 +37,11 @@ If you want OpenAI or ElevenLabs:
 
 - `ELEVENLABS_API_KEY` (or `XI_API_KEY`)
 - `OPENAI_API_KEY`
+
+If you want Qwen3 FastAPI:
+
+- `messages.tts.qwen3Fastapi.baseUrl` (or `QWEN3_FASTAPI_BASE_URL`)
+- Optional `QWEN3_FASTAPI_API_KEY`
 
 Edge TTS does **not** require an API key. If no API keys are found, OpenClaw defaults
 to Edge TTS (unless disabled via `messages.tts.edge.enabled=false`).
@@ -111,6 +117,28 @@ Full schema is in [Gateway configuration](/gateway/configuration).
           useSpeakerBoost: true,
           speed: 1.0,
         },
+      },
+    },
+  },
+}
+```
+
+### Qwen3 FastAPI primary
+
+```json5
+{
+  messages: {
+    tts: {
+      auto: "always",
+      provider: "qwen3-fastapi",
+      qwen3Fastapi: {
+        baseUrl: "http://127.0.0.1:8000/v1",
+        model: "qwen3-tts",
+        voice: "Chelsie",
+        instructions: "Warm and energetic, medium pace.",
+        language: "english",
+        responseFormat: "opus",
+        stream: false,
       },
     },
   },
@@ -204,9 +232,9 @@ Then run:
   - `tagged` only sends audio when the reply includes `[[tts]]` tags.
 - `enabled`: legacy toggle (doctor migrates this to `auto`).
 - `mode`: `"final"` (default) or `"all"` (includes tool/block replies).
-- `provider`: `"elevenlabs"`, `"openai"`, or `"edge"` (fallback is automatic).
-- If `provider` is **unset**, OpenClaw prefers `openai` (if key), then `elevenlabs` (if key),
-  otherwise `edge`.
+- `provider`: `"elevenlabs"`, `"openai"`, `"qwen3-fastapi"`, or `"edge"` (fallback is automatic).
+- If `provider` is **unset**, OpenClaw prefers `qwen3-fastapi` (if configured), then `openai` (if key),
+  then `elevenlabs` (if key), otherwise `edge`.
 - `summaryModel`: optional cheap model for auto-summary; defaults to `agents.defaults.model.primary`.
   - Accepts `provider/model` or a configured model alias.
 - `modelOverrides`: allow the model to emit TTS directives (on by default).
@@ -215,6 +243,13 @@ Then run:
 - `timeoutMs`: request timeout (ms).
 - `prefsPath`: override the local prefs JSON path (provider/limit/summary).
 - `apiKey` values fall back to env vars (`ELEVENLABS_API_KEY`/`XI_API_KEY`, `OPENAI_API_KEY`).
+- `qwen3Fastapi.baseUrl`: Qwen3 FastAPI base URL (for example `http://127.0.0.1:8000/v1`).
+- `qwen3Fastapi.model`: Qwen3 TTS model id for `/audio/speech` (default: `qwen3-tts`).
+- `qwen3Fastapi.voice`: Qwen3 voice id for `/audio/speech`.
+- `qwen3Fastapi.instructions`: optional style instructions for Qwen3 `/audio/speech`.
+- `qwen3Fastapi.language`: optional Qwen language name (e.g. `english`, `german`). ISO codes like `en` are normalized.
+- `qwen3Fastapi.responseFormat`: non-stream output format (`mp3`, `opus`, `pcm`).
+- `qwen3Fastapi.stream`: request streamed Qwen3 audio (used for progressive Discord voice playback; default: `false`).
 - `elevenlabs.baseUrl`: override ElevenLabs API base URL.
 - `elevenlabs.voiceSettings`:
   - `stability`, `similarityBoost`, `style`: `0..1`
@@ -256,12 +291,14 @@ Here you go.
 
 Available directive keys (when enabled):
 
-- `provider` (`openai` | `elevenlabs` | `edge`, requires `allowProvider: true`)
+- `provider` (`openai` | `qwen3-fastapi` | `elevenlabs` | `edge`, requires `allowProvider: true`)
 - `voice` (OpenAI voice) or `voiceId` (ElevenLabs)
 - `model` (OpenAI TTS model or ElevenLabs model id)
+- `instruct` / `instructions` (Qwen3 FastAPI instruction string; applies to `qwen3-fastapi`)
+- `stream` (`true|false`, Qwen3 FastAPI stream mode; applies to `qwen3-fastapi`)
 - `stability`, `similarityBoost`, `style`, `speed`, `useSpeakerBoost`
 - `applyTextNormalization` (`auto|on|off`)
-- `languageCode` (ISO 639-1)
+- `language` (for `qwen3-fastapi`: use names like `english`; ISO aliases like `en` are normalized. `languageCode` remains for ElevenLabs)
 - `seed`
 
 Disable all model overrides:
@@ -288,6 +325,8 @@ Optional allowlist (enable provider switching while keeping other knobs configur
         enabled: true,
         allowProvider: true,
         allowSeed: false,
+        allowInstructions: true,
+        allowStream: true,
       },
     },
   },
@@ -311,9 +350,9 @@ These override `messages.tts.*` for that host.
 
 ## Output formats (fixed)
 
-- **Telegram**: Opus voice note (`opus_48000_64` from ElevenLabs, `opus` from OpenAI).
+- **Telegram**: Opus voice note (`opus_48000_64` from ElevenLabs, `opus` from OpenAI/qwen3-fastapi).
   - 48kHz / 64kbps is a good voice-note tradeoff and required for the round bubble.
-- **Other channels**: MP3 (`mp3_44100_128` from ElevenLabs, `mp3` from OpenAI).
+- **Other channels**: MP3 (`mp3_44100_128` from ElevenLabs, `mp3` from OpenAI/qwen3-fastapi).
   - 44.1kHz / 128kbps is the default balance for speech clarity.
 - **Edge TTS**: uses `edge.outputFormat` (default `audio-24khz-48kbitrate-mono-mp3`).
   - `node-edge-tts` accepts an `outputFormat`, but not all formats are available
@@ -323,7 +362,7 @@ These override `messages.tts.*` for that host.
     guaranteed Opus voice notes. citeturn1search1
   - If the configured Edge output format fails, OpenClaw retries with MP3.
 
-OpenAI/ElevenLabs formats are fixed; Telegram expects Opus for voice-note UX.
+OpenAI/Qwen3 FastAPI/ElevenLabs formats are fixed; Telegram expects Opus for voice-note UX.
 
 ## Auto-TTS behavior
 
