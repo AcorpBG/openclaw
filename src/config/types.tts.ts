@@ -1,4 +1,4 @@
-export type TtsProvider = "elevenlabs" | "openai" | "edge";
+export type TtsProvider = "elevenlabs" | "openai" | "qwen3-fastapi" | "edge";
 
 export type TtsMode = "final" | "all";
 
@@ -21,6 +21,10 @@ export type TtsModelOverrideConfig = {
   allowNormalization?: boolean;
   /** Allow model-provided seed override. */
   allowSeed?: boolean;
+  /** Allow model-provided qwen3-fastapi style instructions override. */
+  allowInstructions?: boolean;
+  /** Allow model-provided qwen3-fastapi stream-mode override. */
+  allowStream?: boolean;
 };
 
 export type TtsConfig = {
@@ -58,6 +62,24 @@ export type TtsConfig = {
     apiKey?: string;
     model?: string;
     voice?: string;
+  };
+  /** Qwen3 FastAPI configuration (OpenAI-compatible /audio/speech). */
+  qwen3Fastapi?: {
+    apiKey?: string;
+    /** Base URL for the Qwen3 FastAPI server (for example http://127.0.0.1:8000/v1). */
+    baseUrl?: string;
+    model?: string;
+    voice?: string;
+    /** Optional style instructions passed to /audio/speech. */
+    instructions?: string;
+    /** Language hint for Qwen3 FastAPI (prefer names like english/german; ISO aliases like en/de are normalized). */
+    language?: string;
+    /** Legacy alias for qwen3Fastapi.language. */
+    languageCode?: string;
+    /** Non-stream response format for Qwen3 FastAPI. */
+    responseFormat?: "mp3" | "opus" | "pcm";
+    /** Request streamed audio when supported by the backend. */
+    stream?: boolean;
   };
   /** Microsoft Edge (node-edge-tts) configuration. */
   edge?: {
