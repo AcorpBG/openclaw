@@ -183,7 +183,7 @@ export const MarkdownConfigSchema = z
   .strict()
   .optional();
 
-export const TtsProviderSchema = z.enum(["elevenlabs", "openai", "edge"]);
+export const TtsProviderSchema = z.enum(["elevenlabs", "openai", "qwen3-fastapi", "edge"]);
 export const TtsModeSchema = z.enum(["final", "all"]);
 export const TtsAutoSchema = z.enum(["off", "always", "inbound", "tagged"]);
 export const TtsConfigSchema = z
@@ -203,6 +203,8 @@ export const TtsConfigSchema = z
         allowVoiceSettings: z.boolean().optional(),
         allowNormalization: z.boolean().optional(),
         allowSeed: z.boolean().optional(),
+        allowInstructions: z.boolean().optional(),
+        allowStream: z.boolean().optional(),
       })
       .strict()
       .optional(),
@@ -233,6 +235,21 @@ export const TtsConfigSchema = z
         apiKey: z.string().optional().register(sensitive),
         model: z.string().optional(),
         voice: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+    qwen3Fastapi: z
+      .object({
+        apiKey: z.string().optional().register(sensitive),
+        baseUrl: z.string().optional(),
+        model: z.string().optional(),
+        voice: z.string().optional(),
+        instructions: z.string().optional(),
+        language: z.string().optional(),
+        // Legacy alias; prefer qwen3Fastapi.language.
+        languageCode: z.string().optional(),
+        responseFormat: z.union([z.literal("mp3"), z.literal("opus"), z.literal("pcm")]).optional(),
+        stream: z.boolean().optional(),
       })
       .strict()
       .optional(),

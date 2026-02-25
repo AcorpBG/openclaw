@@ -10,6 +10,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import path from "node:path";
+import type { Readable } from "node:stream";
 import type { ReplyPayload } from "../auto-reply/types.js";
 import { normalizeChannelId } from "../channels/plugins/index.js";
 import type { ChannelId } from "../channels/plugins/types.js";
@@ -36,6 +37,9 @@ import {
   OPENAI_TTS_MODELS,
   OPENAI_TTS_VOICES,
   openaiTTS,
+  openaiTTSReadable,
+  qwen3FastapiTTS,
+  qwen3FastapiTTSReadable,
   parseTtsDirectives,
   scheduleCleanup,
   summarizeText,
@@ -52,6 +56,8 @@ const DEFAULT_ELEVENLABS_VOICE_ID = "pMsXgVXv3BLzUgSXRplE";
 const DEFAULT_ELEVENLABS_MODEL_ID = "eleven_multilingual_v2";
 const DEFAULT_OPENAI_MODEL = "gpt-4o-mini-tts";
 const DEFAULT_OPENAI_VOICE = "alloy";
+const DEFAULT_QWEN3_FASTAPI_MODEL = "qwen3-tts";
+const DEFAULT_QWEN3_FASTAPI_VOICE = "";
 const DEFAULT_EDGE_VOICE = "en-US-MichelleNeural";
 const DEFAULT_EDGE_LANG = "en-US";
 const DEFAULT_EDGE_OUTPUT_FORMAT = "audio-24khz-48kbitrate-mono-mp3";
@@ -84,6 +90,7 @@ const TELEPHONY_OUTPUT = {
   openai: { format: "pcm" as const, sampleRate: 24000 },
   elevenlabs: { format: "pcm_22050", sampleRate: 22050 },
 };
+const QWEN3_FASTAPI_PCM_SAMPLE_RATE = 24_000;
 
 const TTS_AUTO_MODES = new Set<TtsAutoMode>(["off", "always", "inbound", "tagged"]);
 
@@ -114,6 +121,16 @@ export type ResolvedTtsConfig = {
     apiKey?: string;
     model: string;
     voice: string;
+  };
+  qwen3Fastapi: {
+    apiKey?: string;
+    baseUrl?: string;
+    model: string;
+    voice: string;
+    instructions?: string;
+    language?: string;
+    responseFormat?: "mp3" | "opus" | "pcm";
+    stream: boolean;
   };
   edge: {
     enabled: boolean;
@@ -152,6 +169,8 @@ export type ResolvedTtsModelOverrides = {
   allowVoiceSettings: boolean;
   allowNormalization: boolean;
   allowSeed: boolean;
+  allowInstructions: boolean;
+  allowStream: boolean;
 };
 
 export type TtsDirectiveOverrides = {
@@ -160,6 +179,16 @@ export type TtsDirectiveOverrides = {
   openai?: {
     voice?: string;
     model?: string;
+  };
+  qwen3Fastapi?: {
+    voice?: string;
+    model?: string;
+    instructions?: string;
+    language?: string;
+    /** Legacy alias for qwen3Fastapi.language. */
+    languageCode?: string;
+    responseFormat?: "mp3" | "opus" | "pcm";
+    stream?: boolean;
   };
   elevenlabs?: {
     voiceId?: string;
@@ -182,6 +211,17 @@ export type TtsDirectiveParseResult = {
 export type TtsResult = {
   success: boolean;
   audioPath?: string;
+  error?: string;
+  latencyMs?: number;
+  provider?: string;
+  outputFormat?: string;
+  voiceCompatible?: boolean;
+};
+
+export type TtsStreamResult = {
+  success: boolean;
+  audioStream?: Readable;
+  progressive?: boolean;
   error?: string;
   latencyMs?: number;
   provider?: string;
@@ -236,6 +276,8 @@ function resolveModelOverridePolicy(
       allowVoiceSettings: false,
       allowNormalization: false,
       allowSeed: false,
+      allowInstructions: false,
+      allowStream: false,
     };
   }
   const allow = (value: boolean | undefined, defaultValue = true) => value ?? defaultValue;
@@ -249,6 +291,8 @@ function resolveModelOverridePolicy(
     allowVoiceSettings: allow(overrides?.allowVoiceSettings),
     allowNormalization: allow(overrides?.allowNormalization),
     allowSeed: allow(overrides?.allowSeed),
+    allowInstructions: allow(overrides?.allowInstructions),
+    allowStream: allow(overrides?.allowStream),
   };
 }
 
@@ -289,6 +333,17 @@ export function resolveTtsConfig(cfg: OpenClawConfig): ResolvedTtsConfig {
       apiKey: raw.openai?.apiKey,
       model: raw.openai?.model ?? DEFAULT_OPENAI_MODEL,
       voice: raw.openai?.voice ?? DEFAULT_OPENAI_VOICE,
+    },
+    qwen3Fastapi: {
+      apiKey: raw.qwen3Fastapi?.apiKey,
+      baseUrl: raw.qwen3Fastapi?.baseUrl?.trim() || process.env.QWEN3_FASTAPI_BASE_URL?.trim(),
+      model: raw.qwen3Fastapi?.model?.trim() || DEFAULT_QWEN3_FASTAPI_MODEL,
+      voice: raw.qwen3Fastapi?.voice?.trim() || DEFAULT_QWEN3_FASTAPI_VOICE,
+      instructions: raw.qwen3Fastapi?.instructions?.trim() || undefined,
+      language:
+        raw.qwen3Fastapi?.language?.trim() || raw.qwen3Fastapi?.languageCode?.trim() || undefined,
+      responseFormat: raw.qwen3Fastapi?.responseFormat,
+      stream: raw.qwen3Fastapi?.stream ?? false,
     },
     edge: {
       enabled: raw.edge?.enabled ?? true,
@@ -435,6 +490,9 @@ export function getTtsProvider(config: ResolvedTtsConfig, prefsPath: string): Tt
     return config.provider;
   }
 
+  if (isTtsProviderConfigured(config, "qwen3-fastapi")) {
+    return "qwen3-fastapi";
+  }
   if (resolveTtsApiKey(config, "openai")) {
     return "openai";
   }
@@ -487,6 +545,36 @@ function resolveOutputFormat(channelId?: string | null) {
   return DEFAULT_OUTPUT;
 }
 
+function resolveQwen3FastapiResponseFormat(
+  outputFormat: "mp3" | "opus",
+  streamEnabled: boolean,
+  configuredFormat?: "mp3" | "opus" | "pcm",
+): "mp3" | "opus" | "pcm" {
+  return streamEnabled ? "pcm" : (configuredFormat ?? outputFormat);
+}
+
+function wrapPcmAsWav(pcmBuffer: Buffer, sampleRate: number): Buffer {
+  const channels = 1;
+  const bitsPerSample = 16;
+  const byteRate = sampleRate * channels * (bitsPerSample / 8);
+  const blockAlign = channels * (bitsPerSample / 8);
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcmBuffer.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(pcmBuffer.length, 40);
+  return Buffer.concat([header, pcmBuffer]);
+}
+
 function resolveChannelId(channel: string | undefined): ChannelId | null {
   return channel ? normalizeChannelId(channel) : null;
 }
@@ -505,10 +593,13 @@ export function resolveTtsApiKey(
   if (provider === "openai") {
     return config.openai.apiKey || process.env.OPENAI_API_KEY;
   }
+  if (provider === "qwen3-fastapi") {
+    return config.qwen3Fastapi.apiKey || process.env.QWEN3_FASTAPI_API_KEY;
+  }
   return undefined;
 }
 
-export const TTS_PROVIDERS = ["openai", "elevenlabs", "edge"] as const;
+export const TTS_PROVIDERS = ["openai", "qwen3-fastapi", "elevenlabs", "edge"] as const;
 
 export function resolveTtsProviderOrder(primary: TtsProvider): TtsProvider[] {
   return [primary, ...TTS_PROVIDERS.filter((provider) => provider !== primary)];
@@ -517,6 +608,13 @@ export function resolveTtsProviderOrder(primary: TtsProvider): TtsProvider[] {
 export function isTtsProviderConfigured(config: ResolvedTtsConfig, provider: TtsProvider): boolean {
   if (provider === "edge") {
     return config.edge.enabled;
+  }
+  if (provider === "qwen3-fastapi") {
+    return Boolean(
+      config.qwen3Fastapi.baseUrl?.trim() &&
+      config.qwen3Fastapi.model.trim() &&
+      config.qwen3Fastapi.voice.trim(),
+    );
   }
   return Boolean(resolveTtsApiKey(config, provider));
 }
@@ -628,14 +726,13 @@ export async function textToSpeech(params: {
         };
       }
 
-      const apiKey = resolveTtsApiKey(config, provider);
-      if (!apiKey) {
-        errors.push(`${provider}: no API key`);
-        continue;
-      }
-
       let audioBuffer: Buffer;
       if (provider === "elevenlabs") {
+        const apiKey = resolveTtsApiKey(config, provider);
+        if (!apiKey) {
+          errors.push(`${provider}: no API key`);
+          continue;
+        }
         const voiceIdOverride = params.overrides?.elevenlabs?.voiceId;
         const modelIdOverride = params.overrides?.elevenlabs?.modelId;
         const voiceSettings = {
@@ -658,7 +755,12 @@ export async function textToSpeech(params: {
           voiceSettings,
           timeoutMs: config.timeoutMs,
         });
-      } else {
+      } else if (provider === "openai") {
+        const apiKey = resolveTtsApiKey(config, provider);
+        if (!apiKey) {
+          errors.push(`${provider}: no API key`);
+          continue;
+        }
         const openaiModelOverride = params.overrides?.openai?.model;
         const openaiVoiceOverride = params.overrides?.openai?.voice;
         audioBuffer = await openaiTTS({
@@ -669,15 +771,80 @@ export async function textToSpeech(params: {
           responseFormat: output.openai,
           timeoutMs: config.timeoutMs,
         });
+      } else {
+        const qwenModelOverride = params.overrides?.qwen3Fastapi?.model;
+        const qwenVoiceOverride = params.overrides?.qwen3Fastapi?.voice;
+        const qwenInstructionsOverride = params.overrides?.qwen3Fastapi?.instructions;
+        const qwenLanguageOverride =
+          params.overrides?.qwen3Fastapi?.language ?? params.overrides?.qwen3Fastapi?.languageCode;
+        const qwenResponseFormatOverride = params.overrides?.qwen3Fastapi?.responseFormat;
+        const qwenStreamOverride = params.overrides?.qwen3Fastapi?.stream;
+        const qwenStreamEnabled = qwenStreamOverride ?? config.qwen3Fastapi.stream;
+        const qwenResponseFormat = resolveQwen3FastapiResponseFormat(
+          output.openai,
+          qwenStreamEnabled,
+          qwenResponseFormatOverride ?? config.qwen3Fastapi.responseFormat,
+        );
+        audioBuffer = await qwen3FastapiTTS({
+          text: params.text,
+          baseUrl: config.qwen3Fastapi.baseUrl ?? "",
+          apiKey: resolveTtsApiKey(config, provider),
+          model: qwenModelOverride ?? config.qwen3Fastapi.model,
+          voice: qwenVoiceOverride ?? config.qwen3Fastapi.voice,
+          instructions: qwenInstructionsOverride ?? config.qwen3Fastapi.instructions,
+          language: qwenLanguageOverride ?? config.qwen3Fastapi.language,
+          stream: qwenStreamEnabled,
+          responseFormat: qwenResponseFormat,
+          timeoutMs: config.timeoutMs,
+        });
       }
 
       const latencyMs = Date.now() - providerStart;
+      const fileOutput =
+        provider === "qwen3-fastapi"
+          ? (() => {
+              const qwenStreamEnabled =
+                params.overrides?.qwen3Fastapi?.stream ?? config.qwen3Fastapi.stream;
+              const qwenOutputFormat = resolveQwen3FastapiResponseFormat(
+                output.openai,
+                qwenStreamEnabled,
+                params.overrides?.qwen3Fastapi?.responseFormat ??
+                  config.qwen3Fastapi.responseFormat,
+              );
+              if (qwenOutputFormat === "pcm") {
+                return {
+                  buffer: wrapPcmAsWav(audioBuffer, QWEN3_FASTAPI_PCM_SAMPLE_RATE),
+                  extension: ".wav",
+                  outputFormat: "wav",
+                  voiceCompatible: false,
+                } as const;
+              }
+              return {
+                buffer: audioBuffer,
+                extension: qwenOutputFormat === "opus" ? ".opus" : ".mp3",
+                outputFormat: qwenOutputFormat,
+                voiceCompatible: qwenOutputFormat === "opus",
+              } as const;
+            })()
+          : provider === "openai"
+            ? {
+                buffer: audioBuffer,
+                extension: output.extension,
+                outputFormat: output.openai,
+                voiceCompatible: output.voiceCompatible,
+              }
+            : {
+                buffer: audioBuffer,
+                extension: output.extension,
+                outputFormat: output.elevenlabs,
+                voiceCompatible: output.voiceCompatible,
+              };
 
       const tempRoot = resolvePreferredOpenClawTmpDir();
       mkdirSync(tempRoot, { recursive: true, mode: 0o700 });
       const tempDir = mkdtempSync(path.join(tempRoot, "tts-"));
-      const audioPath = path.join(tempDir, `voice-${Date.now()}${output.extension}`);
-      writeFileSync(audioPath, audioBuffer);
+      const audioPath = path.join(tempDir, `voice-${Date.now()}${fileOutput.extension}`);
+      writeFileSync(audioPath, fileOutput.buffer);
       scheduleCleanup(tempDir);
 
       return {
@@ -685,8 +852,8 @@ export async function textToSpeech(params: {
         audioPath,
         latencyMs,
         provider,
-        outputFormat: provider === "openai" ? output.openai : output.elevenlabs,
-        voiceCompatible: output.voiceCompatible,
+        outputFormat: fileOutput.outputFormat,
+        voiceCompatible: fileOutput.voiceCompatible,
       };
     } catch (err) {
       errors.push(formatTtsProviderError(provider, err));
@@ -697,6 +864,112 @@ export async function textToSpeech(params: {
     success: false,
     error: `TTS conversion failed: ${errors.join("; ") || "no providers available"}`,
   };
+}
+
+export async function textToSpeechStream(params: {
+  text: string;
+  cfg: OpenClawConfig;
+  prefsPath?: string;
+  channel?: string;
+  overrides?: TtsDirectiveOverrides;
+}): Promise<TtsStreamResult> {
+  const config = resolveTtsConfig(params.cfg);
+  const prefsPath = params.prefsPath ?? resolveTtsPrefsPath(config);
+  const channelId = resolveChannelId(params.channel);
+  const output = resolveOutputFormat(channelId);
+
+  if (params.text.length > config.maxTextLength) {
+    return {
+      success: false,
+      error: `Text too long (${params.text.length} chars, max ${config.maxTextLength})`,
+    };
+  }
+
+  const primaryProvider = params.overrides?.provider ?? getTtsProvider(config, prefsPath);
+  if (primaryProvider !== "openai" && primaryProvider !== "qwen3-fastapi") {
+    return {
+      success: false,
+      error: `streaming unsupported for provider ${primaryProvider}`,
+    };
+  }
+
+  const streamEnabled =
+    primaryProvider === "qwen3-fastapi"
+      ? (params.overrides?.qwen3Fastapi?.stream ?? config.qwen3Fastapi.stream)
+      : false;
+  if (!streamEnabled) {
+    return {
+      success: false,
+      error: "streaming disabled",
+    };
+  }
+
+  const providerStart = Date.now();
+  try {
+    if (primaryProvider === "openai") {
+      const apiKey = resolveTtsApiKey(config, "openai");
+      if (!apiKey) {
+        return {
+          success: false,
+          error: "openai: no API key",
+        };
+      }
+      const streamResult = await openaiTTSReadable({
+        text: params.text,
+        apiKey,
+        model: params.overrides?.openai?.model ?? config.openai.model,
+        voice: params.overrides?.openai?.voice ?? config.openai.voice,
+        responseFormat: output.openai,
+        timeoutMs: config.timeoutMs,
+      });
+
+      return {
+        success: true,
+        audioStream: streamResult.stream,
+        progressive: streamResult.progressive,
+        latencyMs: Date.now() - providerStart,
+        provider: "openai",
+        outputFormat: output.openai,
+        voiceCompatible: output.voiceCompatible,
+      };
+    }
+
+    const responseFormat = resolveQwen3FastapiResponseFormat(
+      output.openai,
+      true,
+      params.overrides?.qwen3Fastapi?.responseFormat ?? config.qwen3Fastapi.responseFormat,
+    );
+    const streamResult = await qwen3FastapiTTSReadable({
+      text: params.text,
+      baseUrl: config.qwen3Fastapi.baseUrl ?? "",
+      apiKey: resolveTtsApiKey(config, "qwen3-fastapi"),
+      model: params.overrides?.qwen3Fastapi?.model ?? config.qwen3Fastapi.model,
+      voice: params.overrides?.qwen3Fastapi?.voice ?? config.qwen3Fastapi.voice,
+      instructions:
+        params.overrides?.qwen3Fastapi?.instructions ?? config.qwen3Fastapi.instructions,
+      language:
+        params.overrides?.qwen3Fastapi?.language ??
+        params.overrides?.qwen3Fastapi?.languageCode ??
+        config.qwen3Fastapi.language,
+      responseFormat,
+      timeoutMs: config.timeoutMs,
+    });
+
+    return {
+      success: true,
+      audioStream: streamResult.stream,
+      progressive: streamResult.progressive,
+      latencyMs: Date.now() - providerStart,
+      provider: "qwen3-fastapi",
+      outputFormat: responseFormat,
+      voiceCompatible: responseFormat === "opus",
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: formatTtsProviderError(primaryProvider, err),
+    };
+  }
 }
 
 export async function textToSpeechTelephony(params: {
@@ -727,13 +1000,12 @@ export async function textToSpeechTelephony(params: {
         continue;
       }
 
-      const apiKey = resolveTtsApiKey(config, provider);
-      if (!apiKey) {
-        errors.push(`${provider}: no API key`);
-        continue;
-      }
-
       if (provider === "elevenlabs") {
+        const apiKey = resolveTtsApiKey(config, provider);
+        if (!apiKey) {
+          errors.push(`${provider}: no API key`);
+          continue;
+        }
         const output = TELEPHONY_OUTPUT.elevenlabs;
         const audioBuffer = await elevenLabsTTS({
           text: params.text,
@@ -760,18 +1032,41 @@ export async function textToSpeechTelephony(params: {
       }
 
       const output = TELEPHONY_OUTPUT.openai;
-      const audioBuffer = await openaiTTS({
-        text: params.text,
-        apiKey,
-        model: config.openai.model,
-        voice: config.openai.voice,
-        responseFormat: output.format,
-        timeoutMs: config.timeoutMs,
-      });
+      let audioBuffer: Uint8Array;
+
+      if (provider === "openai") {
+        const apiKey = resolveTtsApiKey(config, provider);
+        if (!apiKey) {
+          throw new Error("no API key");
+        }
+        audioBuffer = await openaiTTS({
+          text: params.text,
+          apiKey,
+          model: config.openai.model,
+          voice: config.openai.voice,
+          responseFormat: output.format,
+          timeoutMs: config.timeoutMs,
+        });
+      } else if (provider === "qwen3-fastapi") {
+        audioBuffer = await qwen3FastapiTTS({
+          text: params.text,
+          baseUrl: config.qwen3Fastapi.baseUrl ?? "",
+          apiKey: resolveTtsApiKey(config, provider),
+          model: config.qwen3Fastapi.model,
+          voice: config.qwen3Fastapi.voice,
+          instructions: config.qwen3Fastapi.instructions,
+          language: config.qwen3Fastapi.language,
+          stream: config.qwen3Fastapi.stream,
+          responseFormat: config.qwen3Fastapi.responseFormat ?? output.format,
+          timeoutMs: config.timeoutMs,
+        });
+      } else {
+        throw new Error("unsupported telephony provider");
+      }
 
       return {
         success: true,
-        audioBuffer,
+        audioBuffer: Buffer.from(audioBuffer),
         latencyMs: Date.now() - providerStart,
         provider,
         outputFormat: output.format,
@@ -944,4 +1239,5 @@ export const _test = {
   summarizeText,
   resolveOutputFormat,
   resolveEdgeOutputFormat,
+  openaiTTS,
 };
