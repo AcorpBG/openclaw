@@ -199,6 +199,98 @@ describe("DiscordVoiceManager low-latency playback", () => {
     expect(textToSpeechMock).not.toHaveBeenCalled();
   });
 
+  it("drops stale buffered playback when a newer reply supersedes it", async () => {
+    let resolveFirstTts: ((value: { success: boolean; audioPath?: string }) => void) | undefined;
+    const firstTts = new Promise<{ success: boolean; audioPath?: string }>((resolve) => {
+      resolveFirstTts = resolve;
+    });
+    textToSpeechMock
+      .mockReset()
+      .mockImplementationOnce(async () => firstTts)
+      .mockResolvedValueOnce({ success: true, audioPath: "/tmp/newer.mp3" });
+
+    const manager = createManager({ enabled: false, ttsStream: false });
+    const entry = createEntry();
+    const playReplyText = (
+      manager as unknown as {
+        playReplyText: (params: {
+          entry: unknown;
+          speakText: string;
+          ttsCfg: Record<string, unknown>;
+          directiveOverrides: Record<string, unknown>;
+        }) => Promise<void>;
+      }
+    ).playReplyText;
+
+    const first = playReplyText.call(manager, {
+      entry,
+      speakText: "old",
+      ttsCfg: {},
+      directiveOverrides: {},
+    });
+    const second = playReplyText.call(manager, {
+      entry,
+      speakText: "new",
+      ttsCfg: {},
+      directiveOverrides: {},
+    });
+    resolveFirstTts?.({ success: true, audioPath: "/tmp/old.mp3" });
+    await Promise.all([first, second]);
+    await entry.playbackQueue;
+
+    expect(createAudioResourceMock).toHaveBeenCalledTimes(1);
+    expect(createAudioResourceMock).toHaveBeenCalledWith("/tmp/newer.mp3");
+  });
+
+  it("destroys stale stream when superseded before enqueue", async () => {
+    let resolveFirstStream:
+      | ((value: { success: boolean; audioStream?: Readable; error?: string }) => void)
+      | undefined;
+    const firstStream = new Promise<{ success: boolean; audioStream?: Readable; error?: string }>(
+      (resolve) => {
+        resolveFirstStream = resolve;
+      },
+    );
+    const staleStream = Readable.from([Buffer.alloc(4)]);
+    const staleDestroySpy = vi.spyOn(staleStream, "destroy");
+    textToSpeechStreamMock
+      .mockReset()
+      .mockImplementationOnce(async () => firstStream)
+      .mockResolvedValueOnce({ success: true, audioStream: Readable.from([Buffer.alloc(4)]) });
+
+    const manager = createManager({ enabled: true, ttsStream: true });
+    const entry = createEntry();
+    const playReplyText = (
+      manager as unknown as {
+        playReplyText: (params: {
+          entry: unknown;
+          speakText: string;
+          ttsCfg: Record<string, unknown>;
+          directiveOverrides: Record<string, unknown>;
+        }) => Promise<void>;
+      }
+    ).playReplyText;
+
+    const first = playReplyText.call(manager, {
+      entry,
+      speakText: "old",
+      ttsCfg: {},
+      directiveOverrides: {},
+    });
+    const second = playReplyText.call(manager, {
+      entry,
+      speakText: "new",
+      ttsCfg: {},
+      directiveOverrides: {},
+    });
+    resolveFirstStream?.({ success: true, audioStream: staleStream });
+    await Promise.all([first, second]);
+    await entry.playbackQueue;
+
+    expect(staleDestroySpy).toHaveBeenCalledTimes(1);
+    expect(playDiscordPcmStreamMock).toHaveBeenCalledTimes(1);
+  });
+
   it("resolves low-latency defaults with flags off", () => {
     expect(managerModule.resolveDiscordVoiceLowLatencyConfig(undefined)).toEqual({
       enabled: false,

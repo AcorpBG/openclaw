@@ -496,6 +496,7 @@ export class DiscordVoiceManager {
       activePlaybackAbortController: null,
       playbackGeneration: 0,
       stop: () => {
+        entry.playbackGeneration += 1;
         this.abortActivePlayback(entry, "session stop");
         if (speakingHandler) {
           connection.receiver.speaking.off("start", speakingHandler);
@@ -604,9 +605,7 @@ export class DiscordVoiceManager {
     logVoiceVerbose(
       `capture start: guild ${entry.guildId} channel ${entry.channelId} user ${userId}`,
     );
-    if (entry.player.state.status === AudioPlayerStatus.Playing) {
-      this.abortActivePlayback(entry, "barge-in");
-    }
+    this.cancelPendingPlayback(entry, "barge-in");
 
     const stream = entry.connection.receiver.subscribe(userId, {
       end: {
@@ -728,6 +727,7 @@ export class DiscordVoiceManager {
     directiveOverrides: ReturnType<typeof parseTtsDirectives>["overrides"];
   }) {
     const { entry, speakText, ttsCfg, directiveOverrides } = params;
+    const playbackGeneration = ++entry.playbackGeneration;
     if (this.shouldUseLowLatencyTts()) {
       const streamResult = await textToSpeechStream({
         text: speakText,
@@ -737,11 +737,18 @@ export class DiscordVoiceManager {
       });
       if (streamResult.success && streamResult.audioStream) {
         const audioStream = streamResult.audioStream;
+        if (playbackGeneration !== entry.playbackGeneration) {
+          audioStream.destroy();
+          return;
+        }
         logVoiceVerbose(
           `tts stream ok (${speakText.length} chars): guild ${entry.guildId} channel ${entry.channelId}`,
         );
         this.enqueuePlayback(entry, async () => {
-          const generation = ++entry.playbackGeneration;
+          if (playbackGeneration !== entry.playbackGeneration) {
+            audioStream.destroy();
+            return;
+          }
           this.abortActivePlayback(entry, "replace stream playback");
           const abortController = new AbortController();
           entry.activePlaybackAbortController = abortController;
@@ -762,7 +769,7 @@ export class DiscordVoiceManager {
           } finally {
             if (
               entry.activePlaybackAbortController === abortController &&
-              entry.playbackGeneration === generation
+              entry.playbackGeneration === playbackGeneration
             ) {
               entry.activePlaybackAbortController = null;
             }
@@ -790,11 +797,17 @@ export class DiscordVoiceManager {
       logger.warn(`discord voice: TTS failed: ${ttsResult.error ?? "unknown error"}`);
       return;
     }
+    if (playbackGeneration !== entry.playbackGeneration) {
+      return;
+    }
     const audioPath = ttsResult.audioPath;
     logVoiceVerbose(
       `tts ok (${speakText.length} chars): guild ${entry.guildId} channel ${entry.channelId}`,
     );
     this.enqueuePlayback(entry, async () => {
+      if (playbackGeneration !== entry.playbackGeneration) {
+        return;
+      }
       this.abortActivePlayback(entry, "replace buffered playback");
       logVoiceVerbose(
         `playback start: guild ${entry.guildId} channel ${entry.channelId} file ${path.basename(audioPath)}`,
@@ -813,6 +826,11 @@ export class DiscordVoiceManager {
 
   private shouldUseLowLatencyTts(): boolean {
     return this.lowLatencyConfig.enabled && this.lowLatencyConfig.ttsStream;
+  }
+
+  private cancelPendingPlayback(entry: VoiceSessionEntry, reason: string) {
+    entry.playbackGeneration += 1;
+    this.abortActivePlayback(entry, reason);
   }
 
   private abortActivePlayback(entry: VoiceSessionEntry, reason: string) {

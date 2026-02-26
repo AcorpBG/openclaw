@@ -115,17 +115,39 @@ export async function playDiscordPcmStream(params: {
   };
   params.abortSignal?.addEventListener("abort", abortListener);
 
-  const pipeDone = new Promise<void>((resolve, reject) => {
-    params.pcmStream.on("error", (err) => reject(err));
-    pcmTransform.on("error", (err) => reject(err));
-    output.on("error", (err) => reject(err));
+  const pipeDone = new Promise<{ error?: Error }>((resolve) => {
+    let done = false;
+    const settle = (error?: Error) => {
+      if (done) {
+        return;
+      }
+      done = true;
+      resolve(error ? { error } : {});
+    };
+    params.pcmStream.on("error", (err) => settle(err));
+    pcmTransform.on("error", (err) => settle(err));
+    output.on("error", (err) => settle(err));
+    output.on("finish", () => settle());
     output.on("close", () => {
-      if (!aborted) {
-        resolve();
+      if (aborted) {
+        settle();
       }
     });
     params.pcmStream.pipe(pcmTransform).pipe(output);
   });
+
+  const abortDone = params.abortSignal
+    ? new Promise<void>((resolve) => {
+        params.abortSignal?.addEventListener(
+          "abort",
+          () => {
+            aborted = true;
+            resolve();
+          },
+          { once: true },
+        );
+      })
+    : null;
 
   try {
     if (!aborted) {
@@ -133,19 +155,11 @@ export async function playDiscordPcmStream(params: {
       await entersState(params.player, AudioPlayerStatus.Playing, PLAYBACK_READY_TIMEOUT_MS).catch(
         () => undefined,
       );
-      await Promise.race([
-        pipeDone,
-        new Promise<void>((resolve) => {
-          params.abortSignal?.addEventListener(
-            "abort",
-            () => {
-              aborted = true;
-              resolve();
-            },
-            { once: true },
-          );
-        }),
-      ]);
+      await (abortDone ? Promise.race([pipeDone, abortDone]) : pipeDone);
+      const { error } = await pipeDone;
+      if (error && !aborted) {
+        throw error;
+      }
       if (!aborted) {
         await entersState(params.player, AudioPlayerStatus.Idle, PLAYBACK_IDLE_TIMEOUT_MS).catch(
           () => undefined,
