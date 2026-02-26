@@ -20,7 +20,7 @@ import { resolveAgentDir } from "../../agents/agent-scope.js";
 import type { MsgContext } from "../../auto-reply/templating.js";
 import { agentCommand } from "../../commands/agent.js";
 import type { OpenClawConfig } from "../../config/config.js";
-import type { DiscordAccountConfig, TtsConfig } from "../../config/types.js";
+import type { DiscordAccountConfig, DiscordVoiceConfig, TtsConfig } from "../../config/types.js";
 import { logVerbose, shouldLogVerbose } from "../../globals.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { resolvePreferredOpenClawTmpDir } from "../../infra/tmp-openclaw-dir.js";
@@ -34,7 +34,13 @@ import {
 import { resolveAgentRoute } from "../../routing/resolve-route.js";
 import type { RuntimeEnv } from "../../runtime.js";
 import { parseTtsDirectives } from "../../tts/tts-core.js";
-import { resolveTtsConfig, textToSpeech, type ResolvedTtsConfig } from "../../tts/tts.js";
+import {
+  resolveTtsConfig,
+  textToSpeech,
+  textToSpeechStream,
+  type ResolvedTtsConfig,
+} from "../../tts/tts.js";
+import { playDiscordPcmStream } from "./stream-playback.js";
 
 const require = createRequire(import.meta.url);
 
@@ -48,6 +54,9 @@ const SPEAKING_READY_TIMEOUT_MS = 60_000;
 const DECRYPT_FAILURE_WINDOW_MS = 30_000;
 const DECRYPT_FAILURE_RECONNECT_THRESHOLD = 3;
 const DECRYPT_FAILURE_PATTERN = /DecryptionFailed\(/;
+const DEFAULT_LOW_LATENCY_MAX_BUFFERED_MS = 6_000;
+const DEFAULT_LOW_LATENCY_CHUNK_MAX_CHARS = 140;
+const DEFAULT_LOW_LATENCY_IDLE_FLUSH_MS = 250;
 
 const logger = createSubsystemLogger("discord/voice");
 
@@ -75,8 +84,35 @@ type VoiceSessionEntry = {
   decryptFailureCount: number;
   lastDecryptFailureAt: number;
   decryptRecoveryInFlight: boolean;
+  activePlaybackAbortController: AbortController | null;
+  playbackGeneration: number;
   stop: () => void;
 };
+
+export type DiscordVoiceLowLatencyResolvedConfig = {
+  enabled: boolean;
+  llmChunking: boolean;
+  ttsStream: boolean;
+  maxBufferedMs: number;
+  chunkMaxChars: number;
+  idleFlushMs: number;
+  fallbackBuffered: boolean;
+};
+
+export function resolveDiscordVoiceLowLatencyConfig(
+  voice: DiscordVoiceConfig | undefined,
+): DiscordVoiceLowLatencyResolvedConfig {
+  const lowLatency = voice?.lowLatency;
+  return {
+    enabled: lowLatency?.enabled ?? false,
+    llmChunking: lowLatency?.llmChunking ?? false,
+    ttsStream: lowLatency?.ttsStream ?? false,
+    maxBufferedMs: lowLatency?.maxBufferedMs ?? DEFAULT_LOW_LATENCY_MAX_BUFFERED_MS,
+    chunkMaxChars: lowLatency?.chunkMaxChars ?? DEFAULT_LOW_LATENCY_CHUNK_MAX_CHARS,
+    idleFlushMs: lowLatency?.idleFlushMs ?? DEFAULT_LOW_LATENCY_IDLE_FLUSH_MS,
+    fallbackBuffered: lowLatency?.fallbackBuffered ?? true,
+  };
+}
 
 export function mergeTtsConfig(base: TtsConfig, override?: TtsConfig): TtsConfig {
   if (!override) {
@@ -278,6 +314,7 @@ export class DiscordVoiceManager {
   private sessions = new Map<string, VoiceSessionEntry>();
   private botUserId?: string;
   private readonly voiceEnabled: boolean;
+  private readonly lowLatencyConfig: DiscordVoiceLowLatencyResolvedConfig;
   private autoJoinTask: Promise<void> | null = null;
 
   constructor(
@@ -292,6 +329,7 @@ export class DiscordVoiceManager {
   ) {
     this.botUserId = params.botUserId;
     this.voiceEnabled = params.discordConfig.voice?.enabled !== false;
+    this.lowLatencyConfig = resolveDiscordVoiceLowLatencyConfig(params.discordConfig.voice);
   }
 
   setBotUserId(id?: string) {
@@ -455,7 +493,10 @@ export class DiscordVoiceManager {
       decryptFailureCount: 0,
       lastDecryptFailureAt: 0,
       decryptRecoveryInFlight: false,
+      activePlaybackAbortController: null,
+      playbackGeneration: 0,
       stop: () => {
+        this.abortActivePlayback(entry, "session stop");
         if (speakingHandler) {
           connection.receiver.speaking.off("start", speakingHandler);
         }
@@ -468,7 +509,7 @@ export class DiscordVoiceManager {
         if (playerErrorHandler) {
           player.off("error", playerErrorHandler);
         }
-        player.stop();
+        player.stop(true);
         connection.destroy();
       },
     };
@@ -564,7 +605,7 @@ export class DiscordVoiceManager {
       `capture start: guild ${entry.guildId} channel ${entry.channelId} user ${userId}`,
     );
     if (entry.player.state.status === AudioPlayerStatus.Playing) {
-      entry.player.stop(true);
+      this.abortActivePlayback(entry, "barge-in");
     }
 
     const stream = entry.connection.receiver.subscribe(userId, {
@@ -672,11 +713,78 @@ export class DiscordVoiceManager {
       return;
     }
 
+    await this.playReplyText({
+      entry,
+      speakText,
+      ttsCfg,
+      directiveOverrides: directive.overrides,
+    });
+  }
+
+  private async playReplyText(params: {
+    entry: VoiceSessionEntry;
+    speakText: string;
+    ttsCfg: OpenClawConfig;
+    directiveOverrides: ReturnType<typeof parseTtsDirectives>["overrides"];
+  }) {
+    const { entry, speakText, ttsCfg, directiveOverrides } = params;
+    if (this.shouldUseLowLatencyTts()) {
+      const streamResult = await textToSpeechStream({
+        text: speakText,
+        cfg: ttsCfg,
+        channel: "discord",
+        overrides: directiveOverrides,
+      });
+      if (streamResult.success && streamResult.audioStream) {
+        const audioStream = streamResult.audioStream;
+        logVoiceVerbose(
+          `tts stream ok (${speakText.length} chars): guild ${entry.guildId} channel ${entry.channelId}`,
+        );
+        this.enqueuePlayback(entry, async () => {
+          const generation = ++entry.playbackGeneration;
+          this.abortActivePlayback(entry, "replace stream playback");
+          const abortController = new AbortController();
+          entry.activePlaybackAbortController = abortController;
+          try {
+            const result = await playDiscordPcmStream({
+              player: entry.player,
+              pcmStream: audioStream,
+              abortSignal: abortController.signal,
+              inputSampleRate: 24_000,
+              inputChannels: 1,
+              maxBufferedMs: this.lowLatencyConfig.maxBufferedMs,
+            });
+            if (!result.aborted) {
+              logVoiceVerbose(
+                `stream playback done: guild ${entry.guildId} channel ${entry.channelId}`,
+              );
+            }
+          } finally {
+            if (
+              entry.activePlaybackAbortController === abortController &&
+              entry.playbackGeneration === generation
+            ) {
+              entry.activePlaybackAbortController = null;
+            }
+          }
+        });
+        return;
+      }
+      logger.warn(
+        `discord voice: streaming TTS failed: ${streamResult.error ?? "unknown error"}${
+          this.lowLatencyConfig.fallbackBuffered ? " (falling back to buffered)" : ""
+        }`,
+      );
+      if (!this.lowLatencyConfig.fallbackBuffered) {
+        return;
+      }
+    }
+
     const ttsResult = await textToSpeech({
       text: speakText,
       cfg: ttsCfg,
       channel: "discord",
-      overrides: directive.overrides,
+      overrides: directiveOverrides,
     });
     if (!ttsResult.success || !ttsResult.audioPath) {
       logger.warn(`discord voice: TTS failed: ${ttsResult.error ?? "unknown error"}`);
@@ -686,8 +794,8 @@ export class DiscordVoiceManager {
     logVoiceVerbose(
       `tts ok (${speakText.length} chars): guild ${entry.guildId} channel ${entry.channelId}`,
     );
-
     this.enqueuePlayback(entry, async () => {
+      this.abortActivePlayback(entry, "replace buffered playback");
       logVoiceVerbose(
         `playback start: guild ${entry.guildId} channel ${entry.channelId} file ${path.basename(audioPath)}`,
       );
@@ -701,6 +809,23 @@ export class DiscordVoiceManager {
       );
       logVoiceVerbose(`playback done: guild ${entry.guildId} channel ${entry.channelId}`);
     });
+  }
+
+  private shouldUseLowLatencyTts(): boolean {
+    return this.lowLatencyConfig.enabled && this.lowLatencyConfig.ttsStream;
+  }
+
+  private abortActivePlayback(entry: VoiceSessionEntry, reason: string) {
+    const active = entry.activePlaybackAbortController;
+    if (!active || active.signal.aborted) {
+      return;
+    }
+    logVoiceVerbose(
+      `playback abort (${reason}): guild ${entry.guildId} channel ${entry.channelId}`,
+    );
+    active.abort();
+    entry.activePlaybackAbortController = null;
+    entry.player.stop(true);
   }
 
   private handleReceiveError(entry: VoiceSessionEntry, err: unknown) {

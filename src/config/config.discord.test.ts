@@ -58,6 +58,42 @@ describe("config discord", () => {
     );
   });
 
+  it("loads discord voice low-latency flags", async () => {
+    await withTempHomeConfig(
+      {
+        channels: {
+          discord: {
+            enabled: true,
+            voice: {
+              enabled: true,
+              lowLatency: {
+                enabled: true,
+                llmChunking: false,
+                ttsStream: true,
+                maxBufferedMs: 7000,
+                chunkMaxChars: 180,
+                idleFlushMs: 300,
+                fallbackBuffered: true,
+              },
+            },
+          },
+        },
+      },
+      async () => {
+        const cfg = loadConfig();
+        expect(cfg.channels?.discord?.voice?.lowLatency).toEqual({
+          enabled: true,
+          llmChunking: false,
+          ttsStream: true,
+          maxBufferedMs: 7000,
+          chunkMaxChars: 180,
+          idleFlushMs: 300,
+          fallbackBuffered: true,
+        });
+      },
+    );
+  });
+
   it("rejects numeric discord allowlist entries", () => {
     const res = validateConfigObject({
       channels: {
