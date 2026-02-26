@@ -9,7 +9,17 @@ const { createAudioResourceMock } = vi.hoisted(() => ({
   createAudioResourceMock: vi.fn((input: unknown) => ({ input })),
 }));
 const { playDiscordPcmStreamMock } = vi.hoisted(() => ({
-  playDiscordPcmStreamMock: vi.fn(async () => ({ aborted: false })),
+  playDiscordPcmStreamMock: vi.fn(async () => ({
+    aborted: false,
+    metrics: {
+      totalInputBytes: 8,
+      totalOutputBytes: 16,
+      firstChunkLatencyMs: 1,
+      playbackStartLatencyMs: 1,
+      underruns: 0,
+      durationMs: 5,
+    },
+  })),
 }));
 
 vi.mock("@discordjs/voice", () => ({
@@ -88,7 +98,17 @@ describe("DiscordVoiceManager low-latency playback", () => {
     textToSpeechStreamMock
       .mockReset()
       .mockResolvedValue({ success: true, audioStream: Readable.from([Buffer.alloc(4)]) });
-    playDiscordPcmStreamMock.mockClear().mockResolvedValue({ aborted: false });
+    playDiscordPcmStreamMock.mockClear().mockResolvedValue({
+      aborted: false,
+      metrics: {
+        totalInputBytes: 8,
+        totalOutputBytes: 16,
+        firstChunkLatencyMs: 1,
+        playbackStartLatencyMs: 1,
+        underruns: 0,
+        durationMs: 5,
+      },
+    });
     createAudioResourceMock.mockClear();
   });
 
@@ -301,5 +321,62 @@ describe("DiscordVoiceManager low-latency playback", () => {
       idleFlushMs: 250,
       fallbackBuffered: true,
     });
+  });
+
+  it("reuses playback generation across chunked dispatch without replacing active playback", async () => {
+    const manager = createManager({ enabled: true, ttsStream: true, llmChunking: true });
+    const entry = createEntry();
+    const playReplyText = (
+      manager as unknown as {
+        playReplyText: (params: {
+          entry: unknown;
+          speakText: string;
+          ttsCfg: Record<string, unknown>;
+          directiveOverrides: Record<string, unknown>;
+          playbackGeneration?: number;
+          supersede?: boolean;
+          replaceActivePlayback?: boolean;
+        }) => Promise<number>;
+      }
+    ).playReplyText;
+
+    const firstGeneration = await playReplyText.call(manager, {
+      entry,
+      speakText: "chunk-1",
+      ttsCfg: {},
+      directiveOverrides: {},
+      supersede: true,
+      replaceActivePlayback: true,
+    });
+    await playReplyText.call(manager, {
+      entry,
+      speakText: "chunk-2",
+      ttsCfg: {},
+      directiveOverrides: {},
+      supersede: false,
+      playbackGeneration: firstGeneration,
+      replaceActivePlayback: false,
+    });
+    await entry.playbackQueue;
+
+    expect(firstGeneration).toBe(1);
+    expect(playDiscordPcmStreamMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("chunks and flushes llm reply text by size and final drain", () => {
+    const emitted: Array<{ chunk: string; reason: string }> = [];
+    const chunker = managerModule._test.createVoiceReplyChunker({
+      maxChars: 12,
+      idleFlushMs: 1_000,
+      emitChunk: (chunk: string, reason: string) => emitted.push({ chunk, reason }),
+    });
+
+    chunker.append("hello world and");
+    chunker.flushFinal();
+
+    expect(emitted).toEqual([
+      { chunk: "hello world", reason: "size" },
+      { chunk: "and", reason: "final" },
+    ]);
   });
 });

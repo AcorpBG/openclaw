@@ -22,6 +22,7 @@ import { agentCommand } from "../../commands/agent.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { DiscordAccountConfig, DiscordVoiceConfig, TtsConfig } from "../../config/types.js";
 import { logVerbose, shouldLogVerbose } from "../../globals.js";
+import { onAgentEvent } from "../../infra/agent-events.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { resolvePreferredOpenClawTmpDir } from "../../infra/tmp-openclaw-dir.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
@@ -70,6 +71,13 @@ type VoiceOperationResult = {
   channelId?: string;
   guildId?: string;
 };
+
+type LowLatencyFallbackReason =
+  | "streaming_disabled"
+  | "stream_tts_failed"
+  | "stream_playback_failed";
+
+type VoiceReplyChunkFlushReason = "size" | "idle" | "final";
 
 type VoiceSessionEntry = {
   guildId: string;
@@ -274,6 +282,106 @@ function scheduleTempCleanup(tempDir: string, delayMs: number = 30 * 60 * 1000):
     });
   }, delayMs);
   timer.unref();
+}
+
+function findVoiceChunkSplitIndex(text: string, maxChars: number): number {
+  const safeMax = Math.max(1, Math.floor(maxChars));
+  if (text.length <= safeMax) {
+    return text.length;
+  }
+  const window = text.slice(0, safeMax);
+  const paragraphBreak = window.lastIndexOf("\n\n");
+  if (paragraphBreak >= Math.floor(safeMax * 0.5)) {
+    return paragraphBreak + 2;
+  }
+  const newlineBreak = window.lastIndexOf("\n");
+  if (newlineBreak >= Math.floor(safeMax * 0.5)) {
+    return newlineBreak + 1;
+  }
+  const sentenceBreak = Math.max(
+    window.lastIndexOf(". "),
+    window.lastIndexOf("! "),
+    window.lastIndexOf("? "),
+  );
+  if (sentenceBreak >= Math.floor(safeMax * 0.5)) {
+    return sentenceBreak + 1;
+  }
+  const spaceBreak = window.lastIndexOf(" ");
+  if (spaceBreak >= Math.floor(safeMax * 0.5)) {
+    return spaceBreak + 1;
+  }
+  return safeMax;
+}
+
+function createVoiceReplyChunker(params: {
+  maxChars: number;
+  idleFlushMs: number;
+  emitChunk: (chunk: string, reason: VoiceReplyChunkFlushReason) => void;
+}) {
+  let buffer = "";
+  let idleTimer: NodeJS.Timeout | undefined;
+  const maxChars = Math.max(1, Math.floor(params.maxChars));
+  const idleFlushMs = Math.max(0, Math.floor(params.idleFlushMs));
+
+  const clearIdleTimer = () => {
+    if (!idleTimer) {
+      return;
+    }
+    clearTimeout(idleTimer);
+    idleTimer = undefined;
+  };
+
+  const emit = (chunk: string, reason: VoiceReplyChunkFlushReason) => {
+    const text = chunk.trim();
+    if (!text) {
+      return;
+    }
+    params.emitChunk(text, reason);
+  };
+
+  const flush = (reason: VoiceReplyChunkFlushReason, force = false) => {
+    clearIdleTimer();
+    while (buffer.length >= maxChars) {
+      const splitIdx = findVoiceChunkSplitIndex(buffer, maxChars);
+      if (splitIdx <= 0) {
+        break;
+      }
+      emit(buffer.slice(0, splitIdx), "size");
+      buffer = buffer.slice(splitIdx).replace(/^\s+/, "");
+    }
+    if (force && buffer.trim().length > 0) {
+      emit(buffer, reason);
+      buffer = "";
+      return;
+    }
+    if (buffer.length > 0 && idleFlushMs > 0) {
+      idleTimer = setTimeout(() => {
+        flush("idle", true);
+      }, idleFlushMs);
+      idleTimer.unref();
+    }
+  };
+
+  return {
+    append(text: string) {
+      if (!text) {
+        return;
+      }
+      buffer += text;
+      flush("size", false);
+    },
+    flushFinal() {
+      flush("final", true);
+      clearIdleTimer();
+    },
+    stop() {
+      clearIdleTimer();
+      buffer = "";
+    },
+    hasBuffered() {
+      return buffer.trim().length > 0;
+    },
+  };
 }
 
 async function transcribeAudio(params: {
@@ -671,17 +779,87 @@ export class DiscordVoiceManager {
 
     const speakerLabel = await this.resolveSpeakerLabel(entry.guildId, userId);
     const prompt = speakerLabel ? `${speakerLabel}: ${transcript}` : transcript;
+    const { cfg: ttsCfg, resolved: ttsConfig } = resolveVoiceTtsConfig({
+      cfg: this.params.cfg,
+      override: this.params.discordConfig.voice?.tts,
+    });
+    const llmChunkingEnabled = this.shouldUseLowLatencyLlmChunking();
+    const runId = `discord-voice-${randomUUID()}`;
+    let streamedReplyText = "";
+    let chunkDispatchCount = 0;
+    let chunkDispatchQueue: Promise<void> = Promise.resolve();
+    let chunkPlaybackGeneration: number | undefined;
+    const enqueueChunkDispatch = (chunk: string, reason: VoiceReplyChunkFlushReason) => {
+      chunkDispatchQueue = chunkDispatchQueue
+        .then(async () => {
+          const directive = parseTtsDirectives(chunk, ttsConfig.modelOverrides);
+          const speakChunk = directive.overrides.ttsText ?? directive.cleanedText.trim();
+          if (!speakChunk) {
+            return;
+          }
+          chunkDispatchCount += 1;
+          this.emitLowLatencyTelemetry("llm_chunk_dispatch", {
+            guildId: entry.guildId,
+            channelId: entry.channelId,
+            chars: speakChunk.length,
+            reason,
+          });
+          chunkPlaybackGeneration = await this.playReplyText({
+            entry,
+            speakText: speakChunk,
+            ttsCfg,
+            directiveOverrides: directive.overrides,
+            supersede: chunkPlaybackGeneration === undefined,
+            playbackGeneration: chunkPlaybackGeneration,
+            replaceActivePlayback: chunkPlaybackGeneration === undefined,
+          });
+        })
+        .catch((err) => {
+          logger.warn(`discord voice: llm chunk dispatch failed: ${formatErrorMessage(err)}`);
+        });
+    };
+    const llmReplyChunker = llmChunkingEnabled
+      ? createVoiceReplyChunker({
+          maxChars: this.lowLatencyConfig.chunkMaxChars,
+          idleFlushMs: this.lowLatencyConfig.idleFlushMs,
+          emitChunk: enqueueChunkDispatch,
+        })
+      : undefined;
+    const stopAgentListener = llmReplyChunker
+      ? onAgentEvent((evt) => {
+          if (evt.runId !== runId || evt.stream !== "assistant") {
+            return;
+          }
+          const delta =
+            typeof evt.data?.delta === "string"
+              ? evt.data.delta
+              : typeof evt.data?.text === "string"
+                ? evt.data.text
+                : "";
+          if (!delta) {
+            return;
+          }
+          streamedReplyText += delta;
+          llmReplyChunker.append(delta);
+        })
+      : undefined;
 
-    const result = await agentCommand(
-      {
-        message: prompt,
-        sessionKey: entry.route.sessionKey,
-        agentId: entry.route.agentId,
-        messageChannel: "discord",
-        deliver: false,
-      },
-      this.params.runtime,
-    );
+    let result: Awaited<ReturnType<typeof agentCommand>>;
+    try {
+      result = await agentCommand(
+        {
+          message: prompt,
+          sessionKey: entry.route.sessionKey,
+          agentId: entry.route.agentId,
+          messageChannel: "discord",
+          deliver: false,
+          runId,
+        },
+        this.params.runtime,
+      );
+    } finally {
+      stopAgentListener?.();
+    }
 
     const replyText = (result.payloads ?? [])
       .map((payload) => payload.text)
@@ -699,10 +877,24 @@ export class DiscordVoiceManager {
       `reply ok (${replyText.length} chars): guild ${entry.guildId} channel ${entry.channelId}`,
     );
 
-    const { cfg: ttsCfg, resolved: ttsConfig } = resolveVoiceTtsConfig({
-      cfg: this.params.cfg,
-      override: this.params.discordConfig.voice?.tts,
-    });
+    if (llmReplyChunker) {
+      if (replyText && replyText !== streamedReplyText) {
+        const suffix = replyText.startsWith(streamedReplyText)
+          ? replyText.slice(streamedReplyText.length)
+          : chunkDispatchCount === 0
+            ? replyText
+            : "";
+        if (suffix.trim()) {
+          llmReplyChunker.append(suffix);
+        }
+      }
+      llmReplyChunker.flushFinal();
+      await chunkDispatchQueue;
+      if (chunkDispatchCount > 0) {
+        return;
+      }
+    }
+
     const directive = parseTtsDirectives(replyText, ttsConfig.modelOverrides);
     const speakText = directive.overrides.ttsText ?? directive.cleanedText.trim();
     if (!speakText) {
@@ -725,9 +917,26 @@ export class DiscordVoiceManager {
     speakText: string;
     ttsCfg: OpenClawConfig;
     directiveOverrides: ReturnType<typeof parseTtsDirectives>["overrides"];
-  }) {
-    const { entry, speakText, ttsCfg, directiveOverrides } = params;
-    const playbackGeneration = ++entry.playbackGeneration;
+    playbackGeneration?: number;
+    supersede?: boolean;
+    replaceActivePlayback?: boolean;
+  }): Promise<number> {
+    const {
+      entry,
+      speakText,
+      ttsCfg,
+      directiveOverrides,
+      playbackGeneration: requestedPlaybackGeneration,
+    } = params;
+    const supersede = params.supersede !== false;
+    const replaceActivePlayback = params.replaceActivePlayback !== false;
+    const playbackGeneration =
+      requestedPlaybackGeneration ??
+      (supersede ? ++entry.playbackGeneration : entry.playbackGeneration);
+    if (supersede && requestedPlaybackGeneration !== undefined) {
+      entry.playbackGeneration = requestedPlaybackGeneration;
+    }
+
     if (this.shouldUseLowLatencyTts()) {
       const streamResult = await textToSpeechStream({
         text: speakText,
@@ -739,7 +948,7 @@ export class DiscordVoiceManager {
         const audioStream = streamResult.audioStream;
         if (playbackGeneration !== entry.playbackGeneration) {
           audioStream.destroy();
-          return;
+          return playbackGeneration;
         }
         logVoiceVerbose(
           `tts stream ok (${speakText.length} chars): guild ${entry.guildId} channel ${entry.channelId}`,
@@ -749,7 +958,9 @@ export class DiscordVoiceManager {
             audioStream.destroy();
             return;
           }
-          this.abortActivePlayback(entry, "replace stream playback");
+          if (replaceActivePlayback) {
+            this.abortActivePlayback(entry, "replace stream playback");
+          }
           const abortController = new AbortController();
           entry.activePlaybackAbortController = abortController;
           try {
@@ -762,10 +973,37 @@ export class DiscordVoiceManager {
               maxBufferedMs: this.lowLatencyConfig.maxBufferedMs,
             });
             if (!result.aborted) {
+              this.emitLowLatencyTelemetry("stream_playback_metrics", {
+                guildId: entry.guildId,
+                channelId: entry.channelId,
+                chars: speakText.length,
+                ...result.metrics,
+              });
               logVoiceVerbose(
                 `stream playback done: guild ${entry.guildId} channel ${entry.channelId}`,
               );
             }
+          } catch (err) {
+            this.emitLowLatencyFallbackTelemetry({
+              entry,
+              reason: "stream_playback_failed",
+              streamError: formatErrorMessage(err),
+              fallbackBuffered: this.lowLatencyConfig.fallbackBuffered,
+            });
+            if (!this.lowLatencyConfig.fallbackBuffered || abortController.signal.aborted) {
+              throw err;
+            }
+            logger.warn(
+              `discord voice: stream playback failed; falling back to buffered TTS: ${formatErrorMessage(err)}`,
+            );
+            await this.enqueueBufferedPlayback({
+              entry,
+              speakText,
+              ttsCfg,
+              directiveOverrides,
+              playbackGeneration,
+              replaceActivePlayback: false,
+            });
           } finally {
             if (
               entry.activePlaybackAbortController === abortController &&
@@ -775,18 +1013,57 @@ export class DiscordVoiceManager {
             }
           }
         });
-        return;
+        return playbackGeneration;
       }
+      this.emitLowLatencyFallbackTelemetry({
+        entry,
+        reason: "stream_tts_failed",
+        streamError: streamResult.error,
+        fallbackBuffered: this.lowLatencyConfig.fallbackBuffered,
+      });
       logger.warn(
         `discord voice: streaming TTS failed: ${streamResult.error ?? "unknown error"}${
           this.lowLatencyConfig.fallbackBuffered ? " (falling back to buffered)" : ""
         }`,
       );
       if (!this.lowLatencyConfig.fallbackBuffered) {
-        return;
+        return playbackGeneration;
       }
+    } else if (this.lowLatencyConfig.enabled) {
+      this.emitLowLatencyFallbackTelemetry({
+        entry,
+        reason: "streaming_disabled",
+        fallbackBuffered: true,
+      });
     }
 
+    await this.enqueueBufferedPlayback({
+      entry,
+      speakText,
+      ttsCfg,
+      directiveOverrides,
+      playbackGeneration,
+      replaceActivePlayback,
+    });
+    return playbackGeneration;
+  }
+
+  private async enqueueBufferedPlayback(params: {
+    entry: VoiceSessionEntry;
+    speakText: string;
+    ttsCfg: OpenClawConfig;
+    directiveOverrides: ReturnType<typeof parseTtsDirectives>["overrides"];
+    playbackGeneration: number;
+    replaceActivePlayback: boolean;
+  }): Promise<void> {
+    const {
+      entry,
+      speakText,
+      ttsCfg,
+      directiveOverrides,
+      playbackGeneration,
+      replaceActivePlayback,
+    } = params;
     const ttsResult = await textToSpeech({
       text: speakText,
       cfg: ttsCfg,
@@ -808,7 +1085,9 @@ export class DiscordVoiceManager {
       if (playbackGeneration !== entry.playbackGeneration) {
         return;
       }
-      this.abortActivePlayback(entry, "replace buffered playback");
+      if (replaceActivePlayback) {
+        this.abortActivePlayback(entry, "replace buffered playback");
+      }
       logVoiceVerbose(
         `playback start: guild ${entry.guildId} channel ${entry.channelId} file ${path.basename(audioPath)}`,
       );
@@ -826,6 +1105,35 @@ export class DiscordVoiceManager {
 
   private shouldUseLowLatencyTts(): boolean {
     return this.lowLatencyConfig.enabled && this.lowLatencyConfig.ttsStream;
+  }
+
+  private shouldUseLowLatencyLlmChunking(): boolean {
+    return this.lowLatencyConfig.enabled && this.lowLatencyConfig.llmChunking;
+  }
+
+  private emitLowLatencyTelemetry(
+    event: string,
+    meta: Record<string, unknown> & { guildId: string; channelId: string },
+  ) {
+    logger.info("discord voice low-latency", {
+      event,
+      ...meta,
+    });
+  }
+
+  private emitLowLatencyFallbackTelemetry(params: {
+    entry: VoiceSessionEntry;
+    reason: LowLatencyFallbackReason;
+    streamError?: string;
+    fallbackBuffered: boolean;
+  }) {
+    this.emitLowLatencyTelemetry("fallback", {
+      guildId: params.entry.guildId,
+      channelId: params.entry.channelId,
+      reason: params.reason,
+      streamError: params.streamError,
+      fallbackBuffered: params.fallbackBuffered,
+    });
   }
 
   private cancelPendingPlayback(entry: VoiceSessionEntry, reason: string) {
@@ -932,3 +1240,8 @@ export class DiscordVoiceReadyListener extends ReadyListener {
 function isVoiceChannel(type: ChannelType) {
   return type === ChannelType.GuildVoice || type === ChannelType.GuildStageVoice;
 }
+
+export const _test = {
+  findVoiceChunkSplitIndex,
+  createVoiceReplyChunker,
+};
