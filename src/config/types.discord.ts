@@ -103,6 +103,8 @@ export type DiscordVoiceAutoJoinConfig = {
 };
 
 export type DiscordVoiceConfig = {
+  /** Low-latency Discord voice playback controls (all off by default). */
+  lowLatency?: DiscordVoiceLowLatencyConfig;
   /** Enable Discord voice channel conversations (default: true). */
   enabled?: boolean;
   /** Voice channels to auto-join on startup. */
@@ -113,6 +115,23 @@ export type DiscordVoiceConfig = {
   decryptionFailureTolerance?: number;
   /** Optional TTS overrides for Discord voice output. */
   tts?: TtsConfig;
+};
+
+export type DiscordVoiceLowLatencyConfig = {
+  /** Enable low-latency streaming playback path (default: false). */
+  enabled?: boolean;
+  /** Enable LLM chunking path for incremental speech (default: false). */
+  llmChunking?: boolean;
+  /** Enable streaming TTS path (default: false). */
+  ttsStream?: boolean;
+  /** Max buffered playback audio before backpressure (default: 6000). */
+  maxBufferedMs?: number;
+  /** Max chars per chunk when chunking is enabled (default: 140). */
+  chunkMaxChars?: number;
+  /** Idle flush timeout in ms when chunking is enabled (default: 250). */
+  idleFlushMs?: number;
+  /** Fallback to buffered file playback if streaming path fails (default: true). */
+  fallbackBuffered?: boolean;
 };
 
 export type DiscordExecApprovalConfig = {

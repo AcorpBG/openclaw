@@ -1376,6 +1376,22 @@ export const FIELD_HELP: Record<string, string> = {
     "Consecutive decrypt failures before DAVE attempts session recovery (passed to @discordjs/voice; default: 24).",
   "channels.discord.voice.tts":
     "Optional TTS overrides for Discord voice playback (merged with messages.tts).",
+  "channels.discord.voice.lowLatency":
+    "Low-latency Discord voice controls for streaming TTS playback. Flags are opt-in and default off (except fallbackBuffered=true).",
+  "channels.discord.voice.lowLatency.enabled":
+    "Enable low-latency Discord voice streaming path (default: false).",
+  "channels.discord.voice.lowLatency.llmChunking":
+    "Enable incremental LLM chunk-to-speech path (default: false). Reserved for chunked reply playback phases.",
+  "channels.discord.voice.lowLatency.ttsStream":
+    "Use textToSpeechStream for Discord voice output (default: false).",
+  "channels.discord.voice.lowLatency.maxBufferedMs":
+    "Max buffered output audio in milliseconds before backpressure in low-latency mode (default: 6000).",
+  "channels.discord.voice.lowLatency.chunkMaxChars":
+    "Max characters per speech chunk when low-latency chunking is enabled (default: 140).",
+  "channels.discord.voice.lowLatency.idleFlushMs":
+    "Idle flush timeout in milliseconds for low-latency chunking (default: 250).",
+  "channels.discord.voice.lowLatency.fallbackBuffered":
+    "Fallback to existing buffered file playback when streaming path fails (default: true).",
   "channels.discord.intents.presence":
     "Enable the Guild Presences privileged intent. Must also be enabled in the Discord Developer Portal. Allows tracking user activities (e.g. Spotify). Default: false.",
   "channels.discord.intents.guildMembers":
