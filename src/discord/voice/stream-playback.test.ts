@@ -46,6 +46,7 @@ describe("playDiscordPcmStream", () => {
     const result = await pending;
 
     expect(result.aborted).toBe(true);
+    expect(result.metrics.underruns).toBeGreaterThanOrEqual(0);
     expect(stop).toHaveBeenCalled();
   });
 

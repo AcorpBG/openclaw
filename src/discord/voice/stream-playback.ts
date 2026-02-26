@@ -79,12 +79,38 @@ export async function playDiscordPcmStream(params: {
   inputSampleRate?: number;
   inputChannels?: 1 | 2;
   maxBufferedMs?: number;
-}): Promise<{ aborted: boolean }> {
+}): Promise<{
+  aborted: boolean;
+  metrics: {
+    totalInputBytes: number;
+    totalOutputBytes: number;
+    firstChunkLatencyMs: number | null;
+    playbackStartLatencyMs: number | null;
+    underruns: number;
+    durationMs: number;
+  };
+}> {
   const inputSampleRate = params.inputSampleRate ?? 24_000;
   const inputChannels = params.inputChannels ?? 1;
   const maxBufferedBytes = resolveMaxBufferedBytes(params.maxBufferedMs);
+  const startedAt = Date.now();
+  let firstChunkAt: number | null = null;
+  let playbackStartedAt: number | null = null;
+  let totalInputBytes = 0;
+  let totalOutputBytes = 0;
+  let underruns = 0;
+  let bufferedMs = 0;
+  let lastBufferUpdatedAt: number | null = null;
+  let hasSeenAudio = false;
 
   const pcmTransform = new PcmTransform(inputSampleRate, inputChannels);
+  const originalPush = pcmTransform.push.bind(pcmTransform);
+  pcmTransform.push = ((chunk: unknown, encoding?: BufferEncoding) => {
+    if (chunk instanceof Buffer) {
+      totalOutputBytes += chunk.length;
+    }
+    return originalPush(chunk, encoding);
+  }) as typeof pcmTransform.push;
   const output = new PassThrough({
     highWaterMark: maxBufferedBytes,
   });
@@ -128,6 +154,28 @@ export async function playDiscordPcmStream(params: {
     pcmTransform.on("error", (err) => settle(err));
     output.on("error", (err) => settle(err));
     output.on("finish", () => settle());
+    params.pcmStream.on("data", (chunk) => {
+      if (!(chunk instanceof Buffer) || chunk.length === 0) {
+        return;
+      }
+      const now = Date.now();
+      if (firstChunkAt === null) {
+        firstChunkAt = now;
+      }
+      totalInputBytes += chunk.length;
+      const chunkFrames = chunk.length / (PCM_SAMPLE_BYTES * inputChannels);
+      const chunkDurationMs = (chunkFrames / inputSampleRate) * 1000;
+      if (lastBufferUpdatedAt !== null) {
+        const elapsedMs = Math.max(0, now - lastBufferUpdatedAt);
+        bufferedMs = Math.max(0, bufferedMs - elapsedMs);
+      }
+      if (hasSeenAudio && playbackStartedAt !== null && bufferedMs <= 0) {
+        underruns += 1;
+      }
+      bufferedMs += chunkDurationMs;
+      hasSeenAudio = true;
+      lastBufferUpdatedAt = now;
+    });
     output.on("close", () => {
       if (aborted) {
         settle();
@@ -152,6 +200,7 @@ export async function playDiscordPcmStream(params: {
   try {
     if (!aborted) {
       params.player.play(resource);
+      playbackStartedAt = Date.now();
       await entersState(params.player, AudioPlayerStatus.Playing, PLAYBACK_READY_TIMEOUT_MS).catch(
         () => undefined,
       );
@@ -166,7 +215,18 @@ export async function playDiscordPcmStream(params: {
         );
       }
     }
-    return { aborted };
+    return {
+      aborted,
+      metrics: {
+        totalInputBytes,
+        totalOutputBytes,
+        firstChunkLatencyMs: firstChunkAt === null ? null : Math.max(0, firstChunkAt - startedAt),
+        playbackStartLatencyMs:
+          playbackStartedAt === null ? null : Math.max(0, playbackStartedAt - startedAt),
+        underruns,
+        durationMs: Math.max(0, Date.now() - startedAt),
+      },
+    };
   } finally {
     params.abortSignal?.removeEventListener("abort", abortListener);
     cleanup(false);
