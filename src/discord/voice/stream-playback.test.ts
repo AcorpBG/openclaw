@@ -1,4 +1,4 @@
-import { PassThrough } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 import type { AudioPlayer } from "@discordjs/voice";
 import { describe, expect, it, vi } from "vitest";
 import { playDiscordPcmStream } from "./stream-playback.js";
@@ -62,5 +62,28 @@ describe("playDiscordPcmStream", () => {
 
     pcm.emit("error", new Error("boom"));
     await expect(pending).rejects.toThrow("boom");
+  });
+
+  it("does not fail on premature close after stream end", async () => {
+    const pcm = new Readable({
+      read() {
+        this.push(Buffer.alloc(8));
+        this.push(null);
+        setImmediate(() => {
+          this.destroy(new Error("Premature close"));
+        });
+      },
+    });
+    const { player } = createPlayer();
+    const pending = playDiscordPcmStream({
+      player,
+      pcmStream: pcm,
+      inputSampleRate: 24_000,
+      inputChannels: 1,
+    });
+
+    const result = await pending;
+
+    expect(result.aborted).toBe(false);
   });
 });

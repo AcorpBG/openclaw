@@ -984,13 +984,19 @@ export class DiscordVoiceManager {
               );
             }
           } catch (err) {
+            if (abortController.signal.aborted || playbackGeneration !== entry.playbackGeneration) {
+              logVoiceVerbose(
+                `stream playback aborted: guild ${entry.guildId} channel ${entry.channelId}`,
+              );
+              return;
+            }
             this.emitLowLatencyFallbackTelemetry({
               entry,
               reason: "stream_playback_failed",
               streamError: formatErrorMessage(err),
               fallbackBuffered: this.lowLatencyConfig.fallbackBuffered,
             });
-            if (!this.lowLatencyConfig.fallbackBuffered || abortController.signal.aborted) {
+            if (!this.lowLatencyConfig.fallbackBuffered) {
               throw err;
             }
             logger.warn(

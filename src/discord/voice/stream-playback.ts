@@ -15,6 +15,13 @@ const MIN_BUFFERED_MS = 200;
 const PLAYBACK_READY_TIMEOUT_MS = 15_000;
 const PLAYBACK_IDLE_TIMEOUT_MS = 60_000;
 
+function isPrematureCloseError(err: unknown): boolean {
+  if (!(err instanceof Error)) {
+    return false;
+  }
+  return err.message.toLowerCase().includes("premature close");
+}
+
 function resolveMaxBufferedBytes(maxBufferedMs?: number): number {
   const boundedMs = Math.max(MIN_BUFFERED_MS, maxBufferedMs ?? DEFAULT_MAX_BUFFERED_MS);
   const bytesPerSecond = DISCORD_SAMPLE_RATE * DISCORD_CHANNELS * PCM_SAMPLE_BYTES;
@@ -102,6 +109,8 @@ export async function playDiscordPcmStream(params: {
   let bufferedMs = 0;
   let lastBufferUpdatedAt: number | null = null;
   let hasSeenAudio = false;
+  let sourceEnded = params.pcmStream.readableEnded;
+  let outputFinished = false;
 
   const pcmTransform = new PcmTransform(inputSampleRate, inputChannels);
   const originalPush = pcmTransform.push.bind(pcmTransform);
@@ -130,9 +139,11 @@ export async function playDiscordPcmStream(params: {
     }
     params.pcmStream.unpipe(pcmTransform);
     pcmTransform.unpipe(output);
-    params.pcmStream.destroy();
-    pcmTransform.destroy();
-    output.destroy();
+    if (stopPlayer || aborted) {
+      params.pcmStream.destroy();
+      pcmTransform.destroy();
+      output.destroy();
+    }
   };
 
   const abortListener = () => {
@@ -150,10 +161,30 @@ export async function playDiscordPcmStream(params: {
       done = true;
       resolve(error ? { error } : {});
     };
-    params.pcmStream.on("error", (err) => settle(err));
-    pcmTransform.on("error", (err) => settle(err));
-    output.on("error", (err) => settle(err));
-    output.on("finish", () => settle());
+    const settleFromError = (err: Error) => {
+      if (
+        aborted ||
+        (isPrematureCloseError(err) &&
+          (sourceEnded ||
+            outputFinished ||
+            params.pcmStream.readableEnded ||
+            output.writableFinished))
+      ) {
+        settle();
+        return;
+      }
+      settle(err);
+    };
+    params.pcmStream.on("error", (err) => settleFromError(err));
+    pcmTransform.on("error", (err) => settleFromError(err));
+    output.on("error", (err) => settleFromError(err));
+    params.pcmStream.on("end", () => {
+      sourceEnded = true;
+    });
+    output.on("finish", () => {
+      outputFinished = true;
+      settle();
+    });
     params.pcmStream.on("data", (chunk) => {
       if (!(chunk instanceof Buffer) || chunk.length === 0) {
         return;
@@ -177,7 +208,7 @@ export async function playDiscordPcmStream(params: {
       lastBufferUpdatedAt = now;
     });
     output.on("close", () => {
-      if (aborted) {
+      if (aborted || outputFinished) {
         settle();
       }
     });

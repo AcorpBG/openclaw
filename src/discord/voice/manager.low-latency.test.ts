@@ -323,6 +323,42 @@ describe("DiscordVoiceManager low-latency playback", () => {
     });
   });
 
+  it("does not trigger buffered fallback when stream playback is aborted", async () => {
+    playDiscordPcmStreamMock.mockReset().mockImplementationOnce(
+      async (params: { abortSignal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          params.abortSignal?.addEventListener(
+            "abort",
+            () => reject(new Error("Premature close")),
+            { once: true },
+          );
+        }),
+    );
+
+    const manager = createManager({ enabled: true, ttsStream: true, fallbackBuffered: true });
+    const entry = createEntry();
+    const playReplyText = manager as unknown as {
+      playReplyText: (params: {
+        entry: unknown;
+        speakText: string;
+        ttsCfg: Record<string, unknown>;
+        directiveOverrides: Record<string, unknown>;
+      }) => Promise<void>;
+      cancelPendingPlayback: (entry: unknown, reason: string) => void;
+    };
+
+    await playReplyText.playReplyText.call(manager, {
+      entry,
+      speakText: "hello",
+      ttsCfg: {},
+      directiveOverrides: {},
+    });
+    playReplyText.cancelPendingPlayback.call(manager, entry, "test abort");
+    await entry.playbackQueue;
+
+    expect(textToSpeechMock).not.toHaveBeenCalled();
+  });
+
   it("reuses playback generation across chunked dispatch without replacing active playback", async () => {
     const manager = createManager({ enabled: true, ttsStream: true, llmChunking: true });
     const entry = createEntry();
