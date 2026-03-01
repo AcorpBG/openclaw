@@ -683,6 +683,21 @@ function resolveTtsStreamTimeoutMs(config: ResolvedTtsConfig, stream?: TtsStream
   return stream?.timeoutMs ?? config.timeoutMs;
 }
 
+function resolveTtsStreamEnabled(params: {
+  config: ResolvedTtsConfig;
+  channelId?: ChannelId;
+  overrides?: TtsDirectiveOverrides;
+  stream?: TtsStreamRequest;
+}): boolean {
+  const openaiSettings = resolveOpenAIDirectives({
+    config: params.config,
+    channelId: params.channelId,
+    streaming: true,
+    overrides: params.overrides,
+  });
+  return params.stream?.enabled ?? openaiSettings.stream;
+}
+
 function resolveOpenAIDirectives(params: {
   config: ResolvedTtsConfig;
   channelId?: string | null;
@@ -975,7 +990,12 @@ export async function textToSpeechStream(params: {
     streaming: true,
     overrides: params.overrides,
   });
-  const streamEnabled = params.stream?.enabled ?? openaiSettings.stream;
+  const streamEnabled = resolveTtsStreamEnabled({
+    config,
+    channelId,
+    overrides: params.overrides,
+    stream: params.stream,
+  });
   if (!streamEnabled) {
     return {
       success: false,
@@ -1046,7 +1066,14 @@ export async function textToSpeechWithFallback(params: {
     voiceCompatible: result.voiceCompatible,
   });
 
-  const streamEnabled = params.stream?.enabled === true;
+  const config = resolveTtsConfig(params.cfg);
+  const channelId = resolveChannelId(params.channel);
+  const streamEnabled = resolveTtsStreamEnabled({
+    config,
+    channelId,
+    overrides: params.overrides,
+    stream: params.stream,
+  });
   if (!streamEnabled) {
     const buffered = await textToSpeech(params);
     if (buffered.success) {
@@ -1072,7 +1099,16 @@ export async function textToSpeechWithFallback(params: {
     };
   }
 
-  const buffered = await textToSpeech(params);
+  const buffered = await textToSpeech({
+    ...params,
+    overrides: {
+      ...params.overrides,
+      openai: {
+        ...params.overrides?.openai,
+        stream: false,
+      },
+    },
+  });
   if (buffered.success) {
     return toBufferedSuccess(buffered, streamResult.error);
   }

@@ -778,6 +778,42 @@ describe("tts", () => {
       expect(body.stream).toBe(true);
     });
 
+    it("uses configured OpenAI stream intent when stream.enabled is omitted", async () => {
+      const cfg: OpenClawConfig = {
+        ...openaiCfg,
+        messages: {
+          tts: {
+            ...openaiCfg.messages?.tts,
+            openai: {
+              ...openaiCfg.messages?.tts?.openai,
+              stream: true,
+            },
+          },
+        },
+      };
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1, 2, 3]));
+          controller.close();
+        },
+      });
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        body: stream,
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const result = await textToSpeechWithFallback({
+        text: "hello",
+        cfg,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.delivery).toBe("stream");
+      const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
+      expect(body.stream).toBe(true);
+    });
+
     it("falls back to buffered output when stream attempt times out", async () => {
       const timeoutErr = new Error("aborted");
       timeoutErr.name = "AbortError";
@@ -797,6 +833,7 @@ describe("tts", () => {
       const result = await textToSpeechWithFallback({
         text: "hello",
         cfg: openaiCfg,
+        overrides: { openai: { stream: true } },
         stream: { enabled: true, timeoutMs: 1, fallbackToBuffered: true },
       });
 
@@ -809,6 +846,16 @@ describe("tts", () => {
       expect(result.audioPath?.endsWith(".mp3")).toBe(true);
       expect(result.fallbackFromError).toContain("request timed out");
       expect(fetchMock).toHaveBeenCalledTimes(2);
+      const firstBody = getFetchRequestBody(
+        fetchMock as unknown as { mock: { calls: unknown[][] } },
+        0,
+      );
+      const secondBody = getFetchRequestBody(
+        fetchMock as unknown as { mock: { calls: unknown[][] } },
+        1,
+      );
+      expect(firstBody.stream).toBe(true);
+      expect(secondBody.stream).toBeUndefined();
     });
 
     it("returns unsupported-provider error when stream fallback is disabled", async () => {
