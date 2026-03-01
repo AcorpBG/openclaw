@@ -61,6 +61,7 @@ const {
   resolveOutputFormat,
   resolveEdgeOutputFormat,
   openaiTTS,
+  openaiTTSReadable,
 } = _test;
 
 const mockAssistantMessage = (content: AssistantMessage["content"]): AssistantMessage => ({
@@ -574,6 +575,54 @@ describe("tts", () => {
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:8880/v1/audio/speech");
+    });
+  });
+
+  describe("openaiTTSReadable", () => {
+    const originalFetch = globalThis.fetch;
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+      vi.useRealTimers();
+    });
+
+    it("keeps timeout active after headers until stream lifecycle completes", async () => {
+      vi.useFakeTimers();
+      let aborted = false;
+      let controllerRef: ReadableStreamDefaultController<Uint8Array> | undefined;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controllerRef = controller;
+        },
+      });
+
+      const fetchMock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
+        init?.signal?.addEventListener("abort", () => {
+          aborted = true;
+          controllerRef?.error(new Error("aborted"));
+        });
+        return {
+          ok: true,
+          headers: { get: () => "audio/mpeg" },
+          body,
+        };
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const result = await openaiTTSReadable({
+        text: "hello",
+        apiKey: "k",
+        model: "gpt-4o-mini-tts",
+        voice: "alloy",
+        responseFormat: "mp3",
+        timeoutMs: 25,
+      });
+
+      expect(result.progressive).toBe(true);
+      expect(aborted).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(30);
+      expect(aborted).toBe(true);
     });
   });
 

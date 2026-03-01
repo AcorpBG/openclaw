@@ -1338,4 +1338,5 @@ export const _test = {
   resolveOutputFormat,
   resolveEdgeOutputFormat,
   openaiTTS,
+  openaiTTSReadable,
 };

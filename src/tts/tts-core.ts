@@ -950,6 +950,10 @@ export async function openaiTTSReadable(params: {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
+  const clearAbortTimer = () => {
+    clearTimeout(timeout);
+  };
+
   try {
     const response = await fetch(`${getOpenAITtsBaseUrl(baseUrl)}/audio/speech`, {
       method: "POST",
@@ -982,13 +986,19 @@ export async function openaiTTSReadable(params: {
       contentType: response.headers?.get?.("content-type") ?? null,
     });
 
+    const stream = Readable.fromWeb(response.body as import("node:stream/web").ReadableStream);
+    stream.once("end", clearAbortTimer);
+    stream.once("error", clearAbortTimer);
+    stream.once("close", clearAbortTimer);
+
     return {
-      stream: Readable.fromWeb(response.body as import("node:stream/web").ReadableStream),
+      stream,
       progressive: true,
       outputFormat,
     };
-  } finally {
-    clearTimeout(timeout);
+  } catch (err) {
+    clearAbortTimer();
+    throw err;
   }
 }
 
