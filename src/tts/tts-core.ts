@@ -826,7 +826,10 @@ export async function openaiTTS(params: {
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const makeRequest = async (enableStream: boolean): Promise<Response> =>
+    const makeRequest = async (
+      enableStream: boolean,
+      signal: AbortSignal = controller.signal,
+    ): Promise<Response> =>
       fetch(`${getOpenAITtsBaseUrl(baseUrl)}/audio/speech`, {
         method: "POST",
         headers: {
@@ -843,7 +846,7 @@ export async function openaiTTS(params: {
           stream: enableStream ? true : undefined,
           stream_format: enableStream ? streamFormat : undefined,
         }),
-        signal: controller.signal,
+        signal,
       });
 
     const toResult = async (res: Response) => {
@@ -859,14 +862,20 @@ export async function openaiTTS(params: {
     };
 
     const attemptBufferedFallback = async (cause?: unknown) => {
-      const fallback = await makeRequest(false);
-      if (!fallback.ok) {
-        if (cause != null) {
-          throw new Error(`OpenAI TTS API error (${fallback.status})`, { cause });
+      const fallbackController = new AbortController();
+      const fallbackTimeout = setTimeout(() => fallbackController.abort(), timeoutMs);
+      try {
+        const fallback = await makeRequest(false, fallbackController.signal);
+        if (!fallback.ok) {
+          if (cause != null) {
+            throw new Error(`OpenAI TTS API error (${fallback.status})`, { cause });
+          }
+          throw new Error(`OpenAI TTS API error (${fallback.status})`);
         }
-        throw new Error(`OpenAI TTS API error (${fallback.status})`);
+        return toResult(fallback);
+      } finally {
+        clearTimeout(fallbackTimeout);
       }
-      return toResult(fallback);
     };
 
     const shouldRequestStream = stream === true;

@@ -485,6 +485,10 @@ describe("tts", () => {
       );
       expect(firstBody.stream).toBe(true);
       expect(secondBody.stream).toBeUndefined();
+
+      const secondInit = (fetchMock as unknown as { mock: { calls: unknown[][] } }).mock
+        .calls[1]?.[1] as RequestInit | undefined;
+      expect(secondInit?.signal?.aborted).toBe(false);
     });
 
     it("rejects unsupported instructions+model combinations", async () => {
