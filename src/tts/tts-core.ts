@@ -124,13 +124,22 @@ export function parseTtsDirectives(
   cleanedText = cleanedText.replace(directiveRegex, (_match, body: string) => {
     hasDirective = true;
     const tokens = body.split(/\s+/).filter(Boolean);
-    for (const token of tokens) {
+    const providerHintMatch = body.match(/(?:^|\s)provider=(openai|elevenlabs|edge)(?=\s|$)/i);
+    const selectedProvider =
+      providerHintMatch?.[1]?.toLowerCase() === "openai" ||
+      providerHintMatch?.[1]?.toLowerCase() === "elevenlabs" ||
+      providerHintMatch?.[1]?.toLowerCase() === "edge"
+        ? (providerHintMatch[1].toLowerCase() as "openai" | "elevenlabs" | "edge")
+        : overrides.provider;
+
+    for (let i = 0; i < tokens.length; i += 1) {
+      const token = tokens[i];
       const eqIndex = token.indexOf("=");
       if (eqIndex === -1) {
         continue;
       }
       const rawKey = token.slice(0, eqIndex).trim();
-      const rawValue = token.slice(eqIndex + 1).trim();
+      let rawValue = token.slice(eqIndex + 1).trim();
       if (!rawKey || !rawValue) {
         continue;
       }
@@ -199,6 +208,18 @@ export function parseTtsDirectives(
               }
               break;
             }
+            if (selectedProvider === "elevenlabs") {
+              overrides.elevenlabs = { ...overrides.elevenlabs, modelId: rawValue };
+              break;
+            }
+            if (selectedProvider === "openai") {
+              if (isValidOpenAIModel(rawValue, options?.openaiBaseUrl)) {
+                overrides.openai = { ...overrides.openai, model: rawValue };
+              } else {
+                warnings.push(`invalid OpenAI model "${rawValue}"`);
+              }
+              break;
+            }
             if (isValidOpenAIModel(rawValue, options?.openaiBaseUrl)) {
               overrides.openai = { ...overrides.openai, model: rawValue };
             } else {
@@ -210,6 +231,10 @@ export function parseTtsDirectives(
           case "instruct":
             if (!policy.allowInstructions) {
               break;
+            }
+            while (i + 1 < tokens.length && !tokens[i + 1].includes("=")) {
+              i += 1;
+              rawValue += ` ${tokens[i]}`;
             }
             overrides.openai = { ...overrides.openai, instructions: rawValue };
             break;

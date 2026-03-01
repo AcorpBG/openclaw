@@ -318,6 +318,15 @@ describe("tts", () => {
       expect(result.overrides.openai?.stream).toBe(true);
     });
 
+    it("parses multi-word instructions and stops at the next directive key", () => {
+      const policy = resolveModelOverridePolicy({ enabled: true });
+      const input = "Hello [[tts:instructions=speak slowly and warmly stream=on]] world";
+      const result = parseTtsDirectives(input, policy, {});
+
+      expect(result.overrides.openai?.instructions).toBe("speak slowly and warmly");
+      expect(result.overrides.openai?.stream).toBe(true);
+    });
+
     it("parses OpenAI responseFormat/speed/streamFormat directives when allowed", () => {
       const policy = resolveModelOverridePolicy({ enabled: true });
       const input = "Hello [[tts:responseFormat=wav openai_speed=1.75 streamFormat=audio]] world";
@@ -343,6 +352,18 @@ describe("tts", () => {
     it("routes explicit ElevenLabs model directives before OpenAI fallback on custom endpoints", () => {
       const policy = resolveModelOverridePolicy({ enabled: true });
       const input = "Hello [[tts:model_id=eleven_multilingual_v2]] world";
+
+      const result = parseTtsDirectives(input, policy, {
+        openaiBaseUrl: "http://localhost:8880/v1",
+      });
+
+      expect(result.overrides.elevenlabs?.modelId).toBe("eleven_multilingual_v2");
+      expect(result.overrides.openai?.model).toBeUndefined();
+    });
+
+    it("routes generic model directives to ElevenLabs when provider=elevenlabs", () => {
+      const policy = resolveModelOverridePolicy({ enabled: true });
+      const input = "Hello [[tts:provider=elevenlabs model=eleven_multilingual_v2]] world";
 
       const result = parseTtsDirectives(input, policy, {
         openaiBaseUrl: "http://localhost:8880/v1",
