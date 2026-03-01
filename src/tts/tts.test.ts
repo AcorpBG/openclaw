@@ -340,6 +340,18 @@ describe("tts", () => {
       expect(result.overrides.elevenlabs?.modelId).toBeUndefined();
     });
 
+    it("routes voice directives using configured custom openai baseUrl", () => {
+      const policy = resolveModelOverridePolicy({ enabled: true });
+      const input = "Hello [[tts:voice=ono_anna]] world";
+
+      const result = parseTtsDirectives(input, policy, {
+        openaiBaseUrl: "http://localhost:8880/v1",
+      });
+
+      expect(result.overrides.openai?.voice).toBe("ono_anna");
+      expect(result.warnings).toEqual([]);
+    });
+
     it("blocks instruction and stream directives when policy disables them", () => {
       const policy = resolveModelOverridePolicy({
         enabled: true,

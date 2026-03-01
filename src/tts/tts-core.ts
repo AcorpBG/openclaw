@@ -153,7 +153,7 @@ export function parseTtsDirectives(
             if (!policy.allowVoice) {
               break;
             }
-            if (isValidOpenAIVoice(rawValue)) {
+            if (isValidOpenAIVoice(rawValue, options?.openaiBaseUrl)) {
               overrides.openai = { ...overrides.openai, voice: rawValue };
             } else {
               warnings.push(`invalid OpenAI voice "${rawValue}"`);
