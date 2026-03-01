@@ -328,6 +328,18 @@ describe("tts", () => {
       expect(result.overrides.openai?.streamFormat).toBe("audio");
     });
 
+    it("routes openai_model directives using configured custom openai baseUrl", () => {
+      const policy = resolveModelOverridePolicy({ enabled: true });
+      const input = "Hello [[tts:openai_model=qwen3-tts]] world";
+
+      const result = parseTtsDirectives(input, policy, {
+        openaiBaseUrl: "http://localhost:8880/v1",
+      });
+
+      expect(result.overrides.openai?.model).toBe("qwen3-tts");
+      expect(result.overrides.elevenlabs?.modelId).toBeUndefined();
+    });
+
     it("blocks instruction and stream directives when policy disables them", () => {
       const policy = resolveModelOverridePolicy({
         enabled: true,

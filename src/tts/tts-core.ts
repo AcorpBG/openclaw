@@ -100,6 +100,7 @@ function parseNumberValue(value: string): number | undefined {
 export function parseTtsDirectives(
   text: string,
   policy: ResolvedTtsModelOverrides,
+  options?: { openaiBaseUrl?: string },
 ): TtsDirectiveParseResult {
   if (!policy.enabled) {
     return { cleanedText: text, overrides: {}, warnings: [], hasDirective: false };
@@ -181,7 +182,7 @@ export function parseTtsDirectives(
             if (!policy.allowModelId) {
               break;
             }
-            if (isValidOpenAIModel(rawValue)) {
+            if (isValidOpenAIModel(rawValue, options?.openaiBaseUrl)) {
               overrides.openai = { ...overrides.openai, model: rawValue };
             } else {
               overrides.elevenlabs = { ...overrides.elevenlabs, modelId: rawValue };
