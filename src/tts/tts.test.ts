@@ -538,6 +538,27 @@ describe("tts", () => {
       ).rejects.toThrow("returned flac but mp3 was requested");
     });
 
+    it("recognizes AAC ADTS profile variants when inferring returned format", async () => {
+      const adts = new Uint8Array([0xff, 0xf0, 0x50, 0x80, 0x00, 0x1f, 0xfc]);
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: { get: () => null },
+        arrayBuffer: async () => adts.buffer,
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        openaiTTS({
+          text: "hello",
+          apiKey: "k",
+          model: "gpt-4o-mini-tts",
+          voice: "alloy",
+          responseFormat: "aac",
+          timeoutMs: 10_000,
+        }),
+      ).resolves.toMatchObject({ outputFormat: "aac" });
+    });
+
     it("keeps strict validation when explicit baseUrl is default OpenAI endpoint", async () => {
       await withEnv({ OPENAI_TTS_BASE_URL: "http://localhost:8880/v1" }, async () => {
         await expect(

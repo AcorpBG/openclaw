@@ -527,7 +527,8 @@ function inferOpenAiFormatFromBytes(audio: Buffer): OpenAiTtsResponseFormat | un
   if (audio.length >= 4 && audio.subarray(0, 4).toString("ascii") === "OggS") {
     return "opus";
   }
-  if (audio.length >= 2 && audio[0] === 0xff && (audio[1] === 0xf1 || audio[1] === 0xf9)) {
+  // ADTS AAC syncword is 0xFFFx (upper 12 bits all ones).
+  if (audio.length >= 2 && audio[0] === 0xff && (audio[1] & 0xf0) === 0xf0) {
     return "aac";
   }
   if (
