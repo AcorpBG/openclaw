@@ -685,17 +685,10 @@ function resolveTtsStreamTimeoutMs(config: ResolvedTtsConfig, stream?: TtsStream
 
 function resolveTtsStreamEnabled(params: {
   config: ResolvedTtsConfig;
-  channelId?: ChannelId;
   overrides?: TtsDirectiveOverrides;
   stream?: TtsStreamRequest;
 }): boolean {
-  const openaiSettings = resolveOpenAIDirectives({
-    config: params.config,
-    channelId: params.channelId,
-    streaming: true,
-    overrides: params.overrides,
-  });
-  return params.stream?.enabled ?? openaiSettings.stream;
+  return params.stream?.enabled ?? params.overrides?.openai?.stream ?? params.config.openai.stream;
 }
 
 function resolveOpenAIDirectives(params: {
@@ -984,15 +977,8 @@ export async function textToSpeechStream(params: {
     };
   }
 
-  const openaiSettings = resolveOpenAIDirectives({
-    config,
-    channelId,
-    streaming: true,
-    overrides: params.overrides,
-  });
   const streamEnabled = resolveTtsStreamEnabled({
     config,
-    channelId,
     overrides: params.overrides,
     stream: params.stream,
   });
@@ -1003,6 +989,13 @@ export async function textToSpeechStream(params: {
       provider: "openai",
     };
   }
+
+  const openaiSettings = resolveOpenAIDirectives({
+    config,
+    channelId,
+    streaming: true,
+    overrides: params.overrides,
+  });
 
   const providerStart = Date.now();
   try {
@@ -1067,10 +1060,8 @@ export async function textToSpeechWithFallback(params: {
   });
 
   const config = resolveTtsConfig(params.cfg);
-  const channelId = resolveChannelId(params.channel);
   const streamEnabled = resolveTtsStreamEnabled({
     config,
-    channelId,
     overrides: params.overrides,
     stream: params.stream,
   });

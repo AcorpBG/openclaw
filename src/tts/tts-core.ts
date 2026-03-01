@@ -125,12 +125,14 @@ export function parseTtsDirectives(
     hasDirective = true;
     const tokens = body.split(/\s+/).filter(Boolean);
     const providerHintMatch = body.match(/(?:^|\s)provider=(openai|elevenlabs|edge)(?=\s|$)/i);
-    const selectedProvider =
-      providerHintMatch?.[1]?.toLowerCase() === "openai" ||
-      providerHintMatch?.[1]?.toLowerCase() === "elevenlabs" ||
-      providerHintMatch?.[1]?.toLowerCase() === "edge"
+    const providerHint =
+      policy.allowProvider &&
+      (providerHintMatch?.[1]?.toLowerCase() === "openai" ||
+        providerHintMatch?.[1]?.toLowerCase() === "elevenlabs" ||
+        providerHintMatch?.[1]?.toLowerCase() === "edge")
         ? (providerHintMatch[1].toLowerCase() as "openai" | "elevenlabs" | "edge")
-        : overrides.provider;
+        : undefined;
+    const selectedProvider = providerHint ?? overrides.provider;
 
     for (let i = 0; i < tokens.length; i += 1) {
       const token = tokens[i];

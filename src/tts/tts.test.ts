@@ -362,7 +362,7 @@ describe("tts", () => {
     });
 
     it("routes generic model directives to ElevenLabs when provider=elevenlabs", () => {
-      const policy = resolveModelOverridePolicy({ enabled: true });
+      const policy = resolveModelOverridePolicy({ enabled: true, allowProvider: true });
       const input = "Hello [[tts:provider=elevenlabs model=eleven_multilingual_v2]] world";
 
       const result = parseTtsDirectives(input, policy, {
@@ -371,6 +371,19 @@ describe("tts", () => {
 
       expect(result.overrides.elevenlabs?.modelId).toBe("eleven_multilingual_v2");
       expect(result.overrides.openai?.model).toBeUndefined();
+    });
+
+    it("ignores provider hint for generic model routing when provider overrides are disabled", () => {
+      const policy = resolveModelOverridePolicy({ enabled: true });
+      const input = "Hello [[tts:provider=elevenlabs model=eleven_multilingual_v2]] world";
+
+      const result = parseTtsDirectives(input, policy, {
+        openaiBaseUrl: "http://localhost:8880/v1",
+      });
+
+      expect(result.overrides.provider).toBeUndefined();
+      expect(result.overrides.openai?.model).toBe("eleven_multilingual_v2");
+      expect(result.overrides.elevenlabs?.modelId).toBeUndefined();
     });
 
     it("routes voice directives using configured custom openai baseUrl", () => {
@@ -812,6 +825,38 @@ describe("tts", () => {
       expect(result.delivery).toBe("stream");
       const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
       expect(body.stream).toBe(true);
+    });
+
+    it("keeps buffered path when stream is disabled even if streamFormat is sse", async () => {
+      const cfg: OpenClawConfig = {
+        ...openaiCfg,
+        messages: {
+          tts: {
+            ...openaiCfg.messages?.tts,
+            openai: {
+              ...openaiCfg.messages?.tts?.openai,
+              stream: false,
+              streamFormat: "sse",
+            },
+          },
+        },
+      };
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const result = await textToSpeechWithFallback({
+        text: "hello",
+        cfg,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.delivery).toBe("buffered");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
+      expect(body.stream).toBeUndefined();
     });
 
     it("falls back to buffered output when stream attempt times out", async () => {
