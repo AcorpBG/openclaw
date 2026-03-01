@@ -10,11 +10,14 @@ import {
   unlinkSync,
 } from "node:fs";
 import path from "node:path";
+import type { Readable } from "node:stream";
 import type { ReplyPayload } from "../auto-reply/types.js";
 import { normalizeChannelId } from "../channels/plugins/index.js";
 import type { ChannelId } from "../channels/plugins/types.js";
 import type { OpenClawConfig } from "../config/config.js";
 import type {
+  OpenAiTtsResponseFormat,
+  OpenAiTtsStreamFormat,
   TtsConfig,
   TtsAutoMode,
   TtsMode,
@@ -33,14 +36,24 @@ import {
   isValidOpenAIModel,
   isValidOpenAIVoice,
   isValidVoiceId,
+  isValidOpenAIResponseFormat,
+  isValidOpenAIStreamFormat,
   OPENAI_TTS_MODELS,
+  OPENAI_TTS_RESPONSE_FORMATS,
+  OPENAI_TTS_STREAM_FORMATS,
   OPENAI_TTS_VOICES,
   openaiTTS,
+  openaiTTSReadable,
   parseTtsDirectives,
   scheduleCleanup,
   summarizeText,
 } from "./tts-core.js";
-export { OPENAI_TTS_MODELS, OPENAI_TTS_VOICES } from "./tts-core.js";
+export {
+  OPENAI_TTS_MODELS,
+  OPENAI_TTS_RESPONSE_FORMATS,
+  OPENAI_TTS_STREAM_FORMATS,
+  OPENAI_TTS_VOICES,
+} from "./tts-core.js";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_TTS_MAX_LENGTH = 1500;
@@ -52,6 +65,9 @@ const DEFAULT_ELEVENLABS_VOICE_ID = "pMsXgVXv3BLzUgSXRplE";
 const DEFAULT_ELEVENLABS_MODEL_ID = "eleven_multilingual_v2";
 const DEFAULT_OPENAI_MODEL = "gpt-4o-mini-tts";
 const DEFAULT_OPENAI_VOICE = "alloy";
+const DEFAULT_OPENAI_RESPONSE_FORMAT: OpenAiTtsResponseFormat = "mp3";
+const DEFAULT_OPENAI_STREAM_FORMAT: OpenAiTtsStreamFormat = "audio";
+const DEFAULT_OPENAI_SPEED = 1;
 const DEFAULT_EDGE_VOICE = "en-US-MichelleNeural";
 const DEFAULT_EDGE_LANG = "en-US";
 const DEFAULT_EDGE_OUTPUT_FORMAT = "audio-24khz-48kbitrate-mono-mp3";
@@ -69,15 +85,11 @@ const TELEGRAM_OUTPUT = {
   // ElevenLabs output formats use codec_sample_rate_bitrate naming.
   // Opus @ 48kHz/64kbps is a good voice-note tradeoff for Telegram.
   elevenlabs: "opus_48000_64",
-  extension: ".opus",
-  voiceCompatible: true,
 };
 
 const DEFAULT_OUTPUT = {
   openai: "mp3" as const,
   elevenlabs: "mp3_44100_128",
-  extension: ".mp3",
-  voiceCompatible: false,
 };
 
 const TELEPHONY_OUTPUT = {
@@ -112,8 +124,15 @@ export type ResolvedTtsConfig = {
   };
   openai: {
     apiKey?: string;
+    baseUrl?: string;
     model: string;
     voice: string;
+    instructions?: string;
+    stream: boolean;
+    responseFormat: OpenAiTtsResponseFormat;
+    responseFormatConfigured: boolean;
+    speed: number;
+    streamFormat: OpenAiTtsStreamFormat;
   };
   edge: {
     enabled: boolean;
@@ -152,6 +171,11 @@ export type ResolvedTtsModelOverrides = {
   allowVoiceSettings: boolean;
   allowNormalization: boolean;
   allowSeed: boolean;
+  allowInstructions: boolean;
+  allowStream: boolean;
+  allowResponseFormat: boolean;
+  allowSpeed: boolean;
+  allowStreamFormat: boolean;
 };
 
 export type TtsDirectiveOverrides = {
@@ -160,6 +184,11 @@ export type TtsDirectiveOverrides = {
   openai?: {
     voice?: string;
     model?: string;
+    instructions?: string;
+    stream?: boolean;
+    responseFormat?: OpenAiTtsResponseFormat;
+    speed?: number;
+    streamFormat?: OpenAiTtsStreamFormat;
   };
   elevenlabs?: {
     voiceId?: string;
@@ -188,6 +217,44 @@ export type TtsResult = {
   outputFormat?: string;
   voiceCompatible?: boolean;
 };
+
+export type TtsStreamResult = {
+  success: boolean;
+  audioStream?: Readable;
+  progressive?: boolean;
+  error?: string;
+  latencyMs?: number;
+  provider?: string;
+  outputFormat?: string;
+  voiceCompatible?: boolean;
+};
+
+export type TtsStreamRequest = {
+  enabled?: boolean;
+  timeoutMs?: number;
+  fallbackToBuffered?: boolean;
+};
+
+export type TtsDeliveryResult =
+  | (TtsStreamResult & {
+      success: true;
+      delivery: "stream";
+      fallbackFromError?: never;
+      audioPath?: never;
+    })
+  | (TtsResult & {
+      success: true;
+      delivery: "buffered";
+      fallbackFromError?: string;
+      audioStream?: never;
+      progressive?: never;
+    })
+  | {
+      success: false;
+      delivery: "stream" | "buffered";
+      error: string;
+      fallbackFromError?: string;
+    };
 
 export type TtsTelephonyResult = {
   success: boolean;
@@ -236,6 +303,11 @@ function resolveModelOverridePolicy(
       allowVoiceSettings: false,
       allowNormalization: false,
       allowSeed: false,
+      allowInstructions: false,
+      allowStream: false,
+      allowResponseFormat: false,
+      allowSpeed: false,
+      allowStreamFormat: false,
     };
   }
   const allow = (value: boolean | undefined, defaultValue = true) => value ?? defaultValue;
@@ -249,6 +321,11 @@ function resolveModelOverridePolicy(
     allowVoiceSettings: allow(overrides?.allowVoiceSettings),
     allowNormalization: allow(overrides?.allowNormalization),
     allowSeed: allow(overrides?.allowSeed),
+    allowInstructions: allow(overrides?.allowInstructions),
+    allowStream: allow(overrides?.allowStream),
+    allowResponseFormat: allow(overrides?.allowResponseFormat),
+    allowSpeed: allow(overrides?.allowSpeed),
+    allowStreamFormat: allow(overrides?.allowStreamFormat),
   };
 }
 
@@ -287,8 +364,15 @@ export function resolveTtsConfig(cfg: OpenClawConfig): ResolvedTtsConfig {
     },
     openai: {
       apiKey: raw.openai?.apiKey,
+      baseUrl: raw.openai?.baseUrl?.trim() || undefined,
       model: raw.openai?.model ?? DEFAULT_OPENAI_MODEL,
       voice: raw.openai?.voice ?? DEFAULT_OPENAI_VOICE,
+      instructions: raw.openai?.instructions?.trim() || undefined,
+      stream: raw.openai?.stream ?? false,
+      responseFormat: raw.openai?.responseFormat ?? DEFAULT_OPENAI_RESPONSE_FORMAT,
+      responseFormatConfigured: Boolean(raw.openai?.responseFormat),
+      speed: raw.openai?.speed ?? DEFAULT_OPENAI_SPEED,
+      streamFormat: raw.openai?.streamFormat ?? DEFAULT_OPENAI_STREAM_FORMAT,
     },
     edge: {
       enabled: raw.edge?.enabled ?? true,
@@ -483,11 +567,66 @@ export function setLastTtsAttempt(entry: TtsStatusEntry | undefined): void {
 /** Channels that require opus audio and support voice-bubble playback */
 const VOICE_BUBBLE_CHANNELS = new Set(["telegram", "feishu", "whatsapp"]);
 
-function resolveOutputFormat(channelId?: string | null) {
-  if (channelId && VOICE_BUBBLE_CHANNELS.has(channelId)) {
-    return TELEGRAM_OUTPUT;
+function resolveOpenAiExtension(responseFormat: OpenAiTtsResponseFormat): string {
+  switch (responseFormat) {
+    case "mp3":
+      return ".mp3";
+    case "opus":
+      return ".opus";
+    case "aac":
+      return ".aac";
+    case "flac":
+      return ".flac";
+    case "wav":
+      return ".wav";
+    case "pcm":
+      return ".pcm";
+    default:
+      return ".bin";
   }
-  return DEFAULT_OUTPUT;
+}
+
+function resolveOpenAiResponseFormat(
+  config: ResolvedTtsConfig,
+  channelId?: string | null,
+): OpenAiTtsResponseFormat {
+  if (config.openai.responseFormatConfigured) {
+    return config.openai.responseFormat;
+  }
+  if (channelId && VOICE_BUBBLE_CHANNELS.has(channelId)) {
+    return TELEGRAM_OUTPUT.openai;
+  }
+  return DEFAULT_OUTPUT.openai;
+}
+
+function resolveElevenLabsExtension(outputFormat: string): string {
+  const normalized = outputFormat.toLowerCase();
+  if (normalized.includes("opus")) {
+    return ".opus";
+  }
+  if (normalized.includes("flac")) {
+    return ".flac";
+  }
+  if (normalized.includes("aac")) {
+    return ".aac";
+  }
+  if (normalized.includes("wav") || normalized.includes("pcm")) {
+    return ".wav";
+  }
+  return ".mp3";
+}
+
+function resolveOutputFormat(config: ResolvedTtsConfig, channelId?: string | null) {
+  const openai = resolveOpenAiResponseFormat(config, channelId);
+  const isVoiceBubble = Boolean(channelId && VOICE_BUBBLE_CHANNELS.has(channelId));
+  const elevenlabs = isVoiceBubble ? TELEGRAM_OUTPUT.elevenlabs : DEFAULT_OUTPUT.elevenlabs;
+  return {
+    openai,
+    openaiExtension: resolveOpenAiExtension(openai),
+    elevenlabs,
+    openaiVoiceCompatible: openai === "opus",
+    elevenlabsVoiceCompatible: isVoiceBubble,
+  };
 }
 
 function resolveChannelId(channel: string | undefined): ChannelId | null {
@@ -532,6 +671,75 @@ function formatTtsProviderError(provider: TtsProvider, err: unknown): string {
   return `${provider}: ${error.message}`;
 }
 
+function resolvePrimaryTtsProvider(params: {
+  config: ResolvedTtsConfig;
+  prefsPath: string;
+  overrides?: TtsDirectiveOverrides;
+}): TtsProvider {
+  return params.overrides?.provider ?? getTtsProvider(params.config, params.prefsPath);
+}
+
+function resolveTtsStreamTimeoutMs(config: ResolvedTtsConfig, stream?: TtsStreamRequest): number {
+  return stream?.timeoutMs ?? config.timeoutMs;
+}
+
+function resolveOpenAIDirectives(params: {
+  config: ResolvedTtsConfig;
+  channelId?: string | null;
+  streaming?: boolean;
+  telephony?: boolean;
+  overrides?: TtsDirectiveOverrides;
+}) {
+  const responseFormat =
+    params.overrides?.openai?.responseFormat ??
+    resolveOpenAiResponseFormat(params.config, params.channelId);
+  if (!isValidOpenAIResponseFormat(responseFormat)) {
+    throw new Error(
+      `openai: invalid responseFormat "${String(responseFormat)}"; valid values: ${OPENAI_TTS_RESPONSE_FORMATS.join(", ")}`,
+    );
+  }
+  if (params.telephony !== true && responseFormat === "pcm") {
+    throw new Error(
+      "openai: responseFormat=pcm is only supported by telephony output. Use wav/opus/mp3 for message playback.",
+    );
+  }
+
+  const streamFormat = params.overrides?.openai?.streamFormat ?? params.config.openai.streamFormat;
+  if (!isValidOpenAIStreamFormat(streamFormat)) {
+    throw new Error(
+      `openai: invalid streamFormat "${String(streamFormat)}"; valid values: ${OPENAI_TTS_STREAM_FORMATS.join(", ")}`,
+    );
+  }
+  if (
+    (params.streaming || params.config.openai.stream || params.overrides?.openai?.stream) &&
+    streamFormat === "sse"
+  ) {
+    throw new Error(
+      "openai: streamFormat=sse is not supported by OpenClaw audio playback yet; use streamFormat=audio.",
+    );
+  }
+
+  const speed = params.overrides?.openai?.speed ?? params.config.openai.speed;
+  if (!Number.isFinite(speed) || speed < 0.25 || speed > 4) {
+    throw new Error("openai: speed must be between 0.25 and 4.0");
+  }
+
+  return {
+    baseUrl: params.config.openai.baseUrl,
+    model: params.overrides?.openai?.model ?? params.config.openai.model,
+    voice: params.overrides?.openai?.voice ?? params.config.openai.voice,
+    instructions: params.overrides?.openai?.instructions ?? params.config.openai.instructions,
+    stream: params.overrides?.openai?.stream ?? params.config.openai.stream,
+    responseFormat,
+    speed,
+    streamFormat,
+  };
+}
+
+export function isTtsStreamingProviderSupported(provider: TtsProvider): boolean {
+  return provider === "openai";
+}
+
 export async function textToSpeech(params: {
   text: string;
   cfg: OpenClawConfig;
@@ -542,7 +750,7 @@ export async function textToSpeech(params: {
   const config = resolveTtsConfig(params.cfg);
   const prefsPath = params.prefsPath ?? resolveTtsPrefsPath(config);
   const channelId = resolveChannelId(params.channel);
-  const output = resolveOutputFormat(channelId);
+  const output = resolveOutputFormat(config, channelId);
 
   if (params.text.length > config.maxTextLength) {
     return {
@@ -662,16 +870,28 @@ export async function textToSpeech(params: {
           timeoutMs: config.timeoutMs,
         });
       } else {
-        const openaiModelOverride = params.overrides?.openai?.model;
-        const openaiVoiceOverride = params.overrides?.openai?.voice;
-        audioBuffer = await openaiTTS({
+        const openaiSettings = resolveOpenAIDirectives({
+          config,
+          channelId,
+          overrides: params.overrides,
+        });
+        const openaiResult = await openaiTTS({
           text: params.text,
           apiKey,
-          model: openaiModelOverride ?? config.openai.model,
-          voice: openaiVoiceOverride ?? config.openai.voice,
-          responseFormat: output.openai,
+          baseUrl: openaiSettings.baseUrl,
+          model: openaiSettings.model,
+          voice: openaiSettings.voice,
+          responseFormat: openaiSettings.responseFormat,
+          speed: openaiSettings.speed,
+          instructions: openaiSettings.instructions,
+          stream: openaiSettings.stream,
+          streamFormat: openaiSettings.streamFormat,
           timeoutMs: config.timeoutMs,
         });
+        audioBuffer = openaiResult.audioBuffer;
+        output.openai = openaiResult.outputFormat;
+        output.openaiExtension = resolveOpenAiExtension(openaiResult.outputFormat);
+        output.openaiVoiceCompatible = openaiResult.outputFormat === "opus";
       }
 
       const latencyMs = Date.now() - providerStart;
@@ -679,7 +899,11 @@ export async function textToSpeech(params: {
       const tempRoot = resolvePreferredOpenClawTmpDir();
       mkdirSync(tempRoot, { recursive: true, mode: 0o700 });
       const tempDir = mkdtempSync(path.join(tempRoot, "tts-"));
-      const audioPath = path.join(tempDir, `voice-${Date.now()}${output.extension}`);
+      const extension =
+        provider === "openai"
+          ? output.openaiExtension
+          : resolveElevenLabsExtension(output.elevenlabs);
+      const audioPath = path.join(tempDir, `voice-${Date.now()}${extension}`);
       writeFileSync(audioPath, audioBuffer);
       scheduleCleanup(tempDir);
 
@@ -689,7 +913,8 @@ export async function textToSpeech(params: {
         latencyMs,
         provider,
         outputFormat: provider === "openai" ? output.openai : output.elevenlabs,
-        voiceCompatible: output.voiceCompatible,
+        voiceCompatible:
+          provider === "openai" ? output.openaiVoiceCompatible : output.elevenlabsVoiceCompatible,
       };
     } catch (err) {
       errors.push(formatTtsProviderError(provider, err));
@@ -699,6 +924,164 @@ export async function textToSpeech(params: {
   return {
     success: false,
     error: `TTS conversion failed: ${errors.join("; ") || "no providers available"}`,
+  };
+}
+
+export async function textToSpeechStream(params: {
+  text: string;
+  cfg: OpenClawConfig;
+  prefsPath?: string;
+  channel?: string;
+  overrides?: TtsDirectiveOverrides;
+  stream?: TtsStreamRequest;
+}): Promise<TtsStreamResult> {
+  const config = resolveTtsConfig(params.cfg);
+  const prefsPath = params.prefsPath ?? resolveTtsPrefsPath(config);
+  const channelId = resolveChannelId(params.channel);
+
+  if (params.text.length > config.maxTextLength) {
+    return {
+      success: false,
+      error: `Text too long (${params.text.length} chars, max ${config.maxTextLength})`,
+    };
+  }
+
+  const provider = resolvePrimaryTtsProvider({
+    config,
+    prefsPath,
+    overrides: params.overrides,
+  });
+
+  if (!isTtsStreamingProviderSupported(provider)) {
+    return {
+      success: false,
+      error: `streaming unsupported for provider ${provider}`,
+      provider,
+    };
+  }
+
+  const apiKey = resolveTtsApiKey(config, "openai");
+  if (!apiKey) {
+    return {
+      success: false,
+      error: "openai: no API key",
+      provider: "openai",
+    };
+  }
+
+  const openaiSettings = resolveOpenAIDirectives({
+    config,
+    channelId,
+    streaming: true,
+    overrides: params.overrides,
+  });
+  const streamEnabled = params.stream?.enabled ?? openaiSettings.stream;
+  if (!streamEnabled) {
+    return {
+      success: false,
+      error: "streaming disabled",
+      provider: "openai",
+    };
+  }
+
+  const providerStart = Date.now();
+  try {
+    const streamResult = await openaiTTSReadable({
+      text: params.text,
+      apiKey,
+      baseUrl: openaiSettings.baseUrl,
+      model: openaiSettings.model,
+      voice: openaiSettings.voice,
+      responseFormat: openaiSettings.responseFormat,
+      speed: openaiSettings.speed,
+      instructions: openaiSettings.instructions,
+      streamFormat: openaiSettings.streamFormat,
+      timeoutMs: resolveTtsStreamTimeoutMs(config, params.stream),
+    });
+    return {
+      success: true,
+      audioStream: streamResult.stream,
+      progressive: streamResult.progressive,
+      latencyMs: Date.now() - providerStart,
+      provider: "openai",
+      outputFormat: streamResult.outputFormat,
+      voiceCompatible: streamResult.outputFormat === "opus",
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: formatTtsProviderError("openai", err),
+      provider: "openai",
+    };
+  }
+}
+
+export async function textToSpeechWithFallback(params: {
+  text: string;
+  cfg: OpenClawConfig;
+  prefsPath?: string;
+  channel?: string;
+  overrides?: TtsDirectiveOverrides;
+  stream?: TtsStreamRequest;
+}): Promise<TtsDeliveryResult> {
+  const toBufferedSuccess = (result: TtsResult, fallbackFromError?: string): TtsDeliveryResult => ({
+    success: true,
+    delivery: "buffered",
+    audioPath: result.audioPath,
+    latencyMs: result.latencyMs,
+    provider: result.provider,
+    outputFormat: result.outputFormat,
+    voiceCompatible: result.voiceCompatible,
+    fallbackFromError,
+  });
+
+  const toStreamSuccess = (result: TtsStreamResult): TtsDeliveryResult => ({
+    success: true,
+    delivery: "stream",
+    audioStream: result.audioStream,
+    progressive: result.progressive,
+    latencyMs: result.latencyMs,
+    provider: result.provider,
+    outputFormat: result.outputFormat,
+    voiceCompatible: result.voiceCompatible,
+  });
+
+  const streamEnabled = params.stream?.enabled === true;
+  if (!streamEnabled) {
+    const buffered = await textToSpeech(params);
+    if (buffered.success) {
+      return toBufferedSuccess(buffered);
+    }
+    return {
+      success: false,
+      delivery: "buffered",
+      error: buffered.error ?? "TTS conversion failed",
+    };
+  }
+
+  const streamResult = await textToSpeechStream(params);
+  if (streamResult.success) {
+    return toStreamSuccess(streamResult);
+  }
+
+  if (params.stream?.fallbackToBuffered === false) {
+    return {
+      success: false,
+      delivery: "stream",
+      error: streamResult.error ?? "TTS streaming failed",
+    };
+  }
+
+  const buffered = await textToSpeech(params);
+  if (buffered.success) {
+    return toBufferedSuccess(buffered, streamResult.error);
+  }
+
+  return {
+    success: false,
+    delivery: "buffered",
+    error: buffered.error ?? "TTS conversion failed",
+    fallbackFromError: streamResult.error,
   };
 }
 
@@ -763,21 +1146,27 @@ export async function textToSpeechTelephony(params: {
       }
 
       const output = TELEPHONY_OUTPUT.openai;
-      const audioBuffer = await openaiTTS({
+      const openaiSettings = resolveOpenAIDirectives({ config, telephony: true });
+      const openaiResult = await openaiTTS({
         text: params.text,
         apiKey,
-        model: config.openai.model,
-        voice: config.openai.voice,
+        baseUrl: openaiSettings.baseUrl,
+        model: openaiSettings.model,
+        voice: openaiSettings.voice,
         responseFormat: output.format,
+        speed: openaiSettings.speed,
+        instructions: openaiSettings.instructions,
+        stream: openaiSettings.stream,
+        streamFormat: openaiSettings.streamFormat,
         timeoutMs: config.timeoutMs,
       });
 
       return {
         success: true,
-        audioBuffer,
+        audioBuffer: openaiResult.audioBuffer,
         latencyMs: Date.now() - providerStart,
         provider,
-        outputFormat: output.format,
+        outputFormat: openaiResult.outputFormat,
         sampleRate: output.sampleRate,
       };
     } catch (err) {
@@ -948,4 +1337,5 @@ export const _test = {
   summarizeText,
   resolveOutputFormat,
   resolveEdgeOutputFormat,
+  openaiTTS,
 };

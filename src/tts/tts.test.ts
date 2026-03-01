@@ -1,5 +1,5 @@
 import { completeSimple, type AssistantMessage } from "@mariozechner/pi-ai";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getApiKeyForModel } from "../agents/model-auth.js";
 import { resolveModel } from "../agents/pi-embedded-runner/model.js";
 import type { OpenClawConfig } from "../config/config.js";
@@ -40,7 +40,14 @@ vi.mock("../agents/model-auth.js", () => ({
   requireApiKey: vi.fn((auth: { apiKey?: string }) => auth.apiKey ?? ""),
 }));
 
-const { _test, resolveTtsConfig, maybeApplyTtsToPayload, getTtsProvider } = tts;
+const {
+  _test,
+  resolveTtsConfig,
+  maybeApplyTtsToPayload,
+  getTtsProvider,
+  textToSpeechStream,
+  textToSpeechWithFallback,
+} = tts;
 
 const {
   isValidVoiceId,
@@ -53,6 +60,7 @@ const {
   summarizeText,
   resolveOutputFormat,
   resolveEdgeOutputFormat,
+  openaiTTS,
 } = _test;
 
 const mockAssistantMessage = (content: AssistantMessage["content"]): AssistantMessage => ({
@@ -78,6 +86,16 @@ const mockAssistantMessage = (content: AssistantMessage["content"]): AssistantMe
   stopReason: "stop",
   timestamp: Date.now(),
 });
+
+function getFetchRequestBody(fetchMock: { mock: { calls: unknown[][] } }, callIndex: number) {
+  const call = fetchMock.mock.calls[callIndex] as [unknown, RequestInit | undefined] | undefined;
+  const init = call?.[1];
+  const body = init?.body;
+  if (typeof body !== "string" || !body.trim()) {
+    return {};
+  }
+  return JSON.parse(body) as Record<string, unknown>;
+}
 
 describe("tts", () => {
   beforeEach(() => {
@@ -123,11 +141,13 @@ describe("tts", () => {
     });
 
     it("rejects invalid voice names", () => {
-      expect(isValidOpenAIVoice("invalid")).toBe(false);
-      expect(isValidOpenAIVoice("")).toBe(false);
-      expect(isValidOpenAIVoice("ALLOY")).toBe(false);
-      expect(isValidOpenAIVoice("alloy ")).toBe(false);
-      expect(isValidOpenAIVoice(" alloy")).toBe(false);
+      withEnv({ OPENAI_TTS_BASE_URL: undefined }, () => {
+        expect(isValidOpenAIVoice("invalid")).toBe(false);
+        expect(isValidOpenAIVoice("")).toBe(false);
+        expect(isValidOpenAIVoice("ALLOY")).toBe(false);
+        expect(isValidOpenAIVoice("alloy ")).toBe(false);
+        expect(isValidOpenAIVoice(" alloy")).toBe(false);
+      });
     });
   });
 
@@ -147,22 +167,31 @@ describe("tts", () => {
         { model: "", expected: false },
         { model: "gpt-4", expected: false },
       ] as const;
-      for (const testCase of cases) {
-        expect(isValidOpenAIModel(testCase.model), testCase.model).toBe(testCase.expected);
-      }
+      withEnv({ OPENAI_TTS_BASE_URL: undefined }, () => {
+        for (const testCase of cases) {
+          expect(isValidOpenAIModel(testCase.model), testCase.model).toBe(testCase.expected);
+        }
+      });
     });
   });
 
   describe("resolveOutputFormat", () => {
+    const baseCfg: OpenClawConfig = {
+      agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+      messages: { tts: {} },
+    };
+
     it("selects opus for voice-bubble channels (telegram/feishu/whatsapp) and mp3 for others", () => {
+      const config = resolveTtsConfig(baseCfg);
       const cases = [
         {
           channel: "telegram",
           expected: {
             openai: "opus",
             elevenlabs: "opus_48000_64",
-            extension: ".opus",
-            voiceCompatible: true,
+            openaiExtension: ".opus",
+            openaiVoiceCompatible: true,
+            elevenlabsVoiceCompatible: true,
           },
         },
         {
@@ -170,8 +199,9 @@ describe("tts", () => {
           expected: {
             openai: "opus",
             elevenlabs: "opus_48000_64",
-            extension: ".opus",
-            voiceCompatible: true,
+            openaiExtension: ".opus",
+            openaiVoiceCompatible: true,
+            elevenlabsVoiceCompatible: true,
           },
         },
         {
@@ -179,8 +209,9 @@ describe("tts", () => {
           expected: {
             openai: "opus",
             elevenlabs: "opus_48000_64",
-            extension: ".opus",
-            voiceCompatible: true,
+            openaiExtension: ".opus",
+            openaiVoiceCompatible: true,
+            elevenlabsVoiceCompatible: true,
           },
         },
         {
@@ -188,18 +219,43 @@ describe("tts", () => {
           expected: {
             openai: "mp3",
             elevenlabs: "mp3_44100_128",
-            extension: ".mp3",
-            voiceCompatible: false,
+            openaiExtension: ".mp3",
+            openaiVoiceCompatible: false,
+            elevenlabsVoiceCompatible: false,
           },
         },
       ] as const;
       for (const testCase of cases) {
-        const output = resolveOutputFormat(testCase.channel);
+        const output = resolveOutputFormat(config, testCase.channel);
         expect(output.openai, testCase.channel).toBe(testCase.expected.openai);
         expect(output.elevenlabs, testCase.channel).toBe(testCase.expected.elevenlabs);
-        expect(output.extension, testCase.channel).toBe(testCase.expected.extension);
-        expect(output.voiceCompatible, testCase.channel).toBe(testCase.expected.voiceCompatible);
+        expect(output.openaiExtension, testCase.channel).toBe(testCase.expected.openaiExtension);
+        expect(output.openaiVoiceCompatible, testCase.channel).toBe(
+          testCase.expected.openaiVoiceCompatible,
+        );
+        expect(output.elevenlabsVoiceCompatible, testCase.channel).toBe(
+          testCase.expected.elevenlabsVoiceCompatible,
+        );
       }
+    });
+
+    it("respects configured openai.responseFormat over channel defaults", () => {
+      const cfg: OpenClawConfig = {
+        ...baseCfg,
+        messages: {
+          tts: {
+            openai: {
+              responseFormat: "flac",
+            },
+          },
+        },
+      };
+      const config = resolveTtsConfig(cfg);
+      const output = resolveOutputFormat(config, "telegram");
+      expect(output.openai).toBe("flac");
+      expect(output.openaiExtension).toBe(".flac");
+      expect(output.openaiVoiceCompatible).toBe(false);
+      expect(output.elevenlabsVoiceCompatible).toBe(true);
     });
   });
 
@@ -252,6 +308,53 @@ describe("tts", () => {
       expect(result.overrides.elevenlabs?.voiceSettings?.speed).toBe(1.1);
     });
 
+    it("parses OpenAI instruction and stream directives when allowed", () => {
+      const policy = resolveModelOverridePolicy({ enabled: true });
+      const input = "Hello [[tts:instructions=calm stream=on]] world";
+      const result = parseTtsDirectives(input, policy);
+
+      expect(result.overrides.openai?.instructions).toBe("calm");
+      expect(result.overrides.openai?.stream).toBe(true);
+    });
+
+    it("parses OpenAI responseFormat/speed/streamFormat directives when allowed", () => {
+      const policy = resolveModelOverridePolicy({ enabled: true });
+      const input = "Hello [[tts:responseFormat=wav openai_speed=1.75 streamFormat=audio]] world";
+      const result = parseTtsDirectives(input, policy);
+
+      expect(result.overrides.openai?.responseFormat).toBe("wav");
+      expect(result.overrides.openai?.speed).toBe(1.75);
+      expect(result.overrides.openai?.streamFormat).toBe("audio");
+    });
+
+    it("blocks instruction and stream directives when policy disables them", () => {
+      const policy = resolveModelOverridePolicy({
+        enabled: true,
+        allowInstructions: false,
+        allowStream: false,
+      });
+      const input = "Hello [[tts:instructions=calm stream=on]] world";
+      const result = parseTtsDirectives(input, policy);
+
+      expect(result.overrides.openai?.instructions).toBeUndefined();
+      expect(result.overrides.openai?.stream).toBeUndefined();
+    });
+
+    it("blocks OpenAI responseFormat/speed/streamFormat directives when policy disables them", () => {
+      const policy = resolveModelOverridePolicy({
+        enabled: true,
+        allowResponseFormat: false,
+        allowSpeed: false,
+        allowStreamFormat: false,
+      });
+      const input = "Hello [[tts:responseFormat=wav openai_speed=1.75 streamFormat=audio]] world";
+      const result = parseTtsDirectives(input, policy);
+
+      expect(result.overrides.openai?.responseFormat).toBeUndefined();
+      expect(result.overrides.openai?.speed).toBeUndefined();
+      expect(result.overrides.openai?.streamFormat).toBeUndefined();
+    });
+
     it("accepts edge as provider override", () => {
       const policy = resolveModelOverridePolicy({ enabled: true, allowProvider: true });
       const input = "Hello [[tts:provider=edge]] world";
@@ -276,6 +379,392 @@ describe("tts", () => {
 
       expect(result.cleanedText).toBe(input);
       expect(result.overrides.provider).toBeUndefined();
+    });
+  });
+
+  describe("openaiTTS", () => {
+    const originalFetch = globalThis.fetch;
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it("sends instructions and stream=true in the first request", async () => {
+      const fetchMock = vi
+        .fn(async () => ({
+          ok: true,
+          arrayBuffer: async () => new ArrayBuffer(1),
+        }))
+        .mockName("fetch");
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await openaiTTS({
+        text: "hello",
+        apiKey: "k",
+        model: "gpt-4o-mini-tts",
+        voice: "alloy",
+        instructions: "calm",
+        stream: true,
+        responseFormat: "mp3",
+        speed: 1.5,
+        streamFormat: "audio",
+        timeoutMs: 10_000,
+      });
+
+      const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
+      expect(body.instructions).toBe("calm");
+      expect(body.stream).toBe(true);
+      expect(body.speed).toBe(1.5);
+      expect(body.stream_format).toBe("audio");
+    });
+
+    it("falls back to non-stream request when stream mode fails", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: false, status: 400 })
+        .mockResolvedValueOnce({
+          ok: true,
+          arrayBuffer: async () => new ArrayBuffer(1),
+        });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await openaiTTS({
+        text: "hello",
+        apiKey: "k",
+        model: "gpt-4o-mini-tts",
+        voice: "alloy",
+        stream: true,
+        responseFormat: "mp3",
+        timeoutMs: 10_000,
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const firstBody = getFetchRequestBody(
+        fetchMock as unknown as { mock: { calls: unknown[][] } },
+        0,
+      );
+      const secondBody = getFetchRequestBody(
+        fetchMock as unknown as { mock: { calls: unknown[][] } },
+        1,
+      );
+      expect(firstBody.stream).toBe(true);
+      expect(secondBody.stream).toBeUndefined();
+    });
+
+    it("rejects unsupported instructions+model combinations", async () => {
+      await withEnv({ OPENAI_TTS_BASE_URL: undefined }, async () => {
+        await expect(
+          openaiTTS({
+            text: "hello",
+            apiKey: "k",
+            model: "tts-1",
+            voice: "alloy",
+            instructions: "calm",
+            responseFormat: "mp3",
+            timeoutMs: 10_000,
+          }),
+        ).rejects.toThrow("OpenAI instructions are unsupported for model tts-1");
+      });
+    });
+
+    it("rejects unsupported sse stream format", async () => {
+      await expect(
+        openaiTTS({
+          text: "hello",
+          apiKey: "k",
+          model: "gpt-4o-mini-tts",
+          voice: "alloy",
+          responseFormat: "mp3",
+          stream: true,
+          streamFormat: "sse",
+          timeoutMs: 10_000,
+        }),
+      ).rejects.toThrow("streamFormat=sse");
+    });
+
+    it("fails fast when upstream returns a mismatched audio format", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: { get: () => "audio/flac" },
+        arrayBuffer: async () => new ArrayBuffer(4),
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        openaiTTS({
+          text: "hello",
+          apiKey: "k",
+          model: "gpt-4o-mini-tts",
+          voice: "alloy",
+          responseFormat: "mp3",
+          timeoutMs: 10_000,
+        }),
+      ).rejects.toThrow("returned flac but mp3 was requested");
+    });
+
+    it("keeps strict validation when explicit baseUrl is default OpenAI endpoint", async () => {
+      await withEnv({ OPENAI_TTS_BASE_URL: "http://localhost:8880/v1" }, async () => {
+        await expect(
+          openaiTTS({
+            text: "hello",
+            apiKey: "k",
+            baseUrl: "https://api.openai.com/v1",
+            model: "custom-model",
+            voice: "custom-voice",
+            responseFormat: "mp3",
+            timeoutMs: 10_000,
+          }),
+        ).rejects.toThrow("Invalid model: custom-model");
+      });
+    });
+
+    it("relaxes model/voice validation on explicit custom OpenAI-compatible baseUrl", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        arrayBuffer: async () => new ArrayBuffer(1),
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await withEnv({ OPENAI_TTS_BASE_URL: undefined }, async () => {
+        await openaiTTS({
+          text: "hello",
+          apiKey: "k",
+          baseUrl: "http://localhost:8880/v1",
+          model: "custom-model",
+          voice: "custom-voice",
+          responseFormat: "mp3",
+          timeoutMs: 10_000,
+        });
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:8880/v1/audio/speech");
+    });
+  });
+
+  describe("streaming plumbing", () => {
+    const originalFetch = globalThis.fetch;
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    const openaiCfg: OpenClawConfig = {
+      agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+      messages: {
+        tts: {
+          provider: "openai",
+          openai: {
+            apiKey: "test-key",
+            model: "gpt-4o-mini-tts",
+            voice: "alloy",
+          },
+        },
+      },
+    };
+
+    it("streams successfully for a stream-capable provider", async () => {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1, 2, 3]));
+          controller.close();
+        },
+      });
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        body: stream,
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const result = await textToSpeechStream({
+        text: "hello",
+        cfg: openaiCfg,
+        stream: { enabled: true },
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.provider).toBe("openai");
+      expect(result.progressive).toBe(true);
+      expect(result.audioStream).toBeDefined();
+
+      const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
+      expect(body.stream).toBe(true);
+    });
+
+    it("falls back to buffered output when stream attempt times out", async () => {
+      const timeoutErr = new Error("aborted");
+      timeoutErr.name = "AbortError";
+      const fetchMock = vi
+        .fn()
+        .mockImplementationOnce((_url: string, init?: RequestInit) => {
+          return new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(timeoutErr));
+          });
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+        });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const result = await textToSpeechWithFallback({
+        text: "hello",
+        cfg: openaiCfg,
+        stream: { enabled: true, timeoutMs: 1, fallbackToBuffered: true },
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.delivery).toBe("buffered");
+      if (!result.success) {
+        throw new Error("Expected buffered fallback success");
+      }
+      expect(result.provider).toBe("openai");
+      expect(result.audioPath?.endsWith(".mp3")).toBe(true);
+      expect(result.fallbackFromError).toContain("request timed out");
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("returns unsupported-provider error when stream fallback is disabled", async () => {
+      const cfg: OpenClawConfig = {
+        agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+        messages: {
+          tts: {
+            provider: "edge",
+          },
+        },
+      };
+
+      const result = await textToSpeechWithFallback({
+        text: "hello",
+        cfg,
+        stream: { enabled: true, fallbackToBuffered: false },
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.delivery).toBe("stream");
+      expect(result.error).toContain("streaming unsupported for provider edge");
+    });
+  });
+
+  describe("textToSpeech OpenAI integration", () => {
+    const originalFetch = globalThis.fetch;
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it("keeps buffered mp3 output as default behavior", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const cfg: OpenClawConfig = {
+        agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+        messages: {
+          tts: {
+            provider: "openai",
+            openai: {
+              apiKey: "test-key",
+              model: "gpt-4o-mini-tts",
+              voice: "alloy",
+            },
+          },
+        },
+      };
+
+      const result = await tts.textToSpeech({
+        text: "hello",
+        cfg,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.outputFormat).toBe("mp3");
+      const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
+      expect(body.instructions).toBeUndefined();
+      expect(body.stream).toBeUndefined();
+    });
+
+    it("uses configured OpenAI baseUrl when provided", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const cfg: OpenClawConfig = {
+        agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+        messages: {
+          tts: {
+            provider: "openai",
+            openai: {
+              apiKey: "test-key",
+              baseUrl: "http://localhost:8880/v1",
+              model: "custom-model",
+              voice: "custom-voice",
+              instructions: "calm",
+              stream: true,
+            },
+          },
+        },
+      };
+
+      const result = await tts.textToSpeech({ text: "hello", cfg });
+
+      expect(result.success).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:8880/v1/audio/speech");
+      const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
+      expect(body.instructions).toBe("calm");
+      expect(body.stream).toBe(true);
+    });
+
+    it("applies configured instructions and stream with buffered fallback", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: false, status: 400 })
+        .mockResolvedValueOnce({
+          ok: true,
+          arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+        });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const cfg: OpenClawConfig = {
+        agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+        messages: {
+          tts: {
+            provider: "openai",
+            openai: {
+              apiKey: "test-key",
+              model: "gpt-4o-mini-tts",
+              voice: "alloy",
+              instructions: "calm",
+              stream: true,
+            },
+          },
+        },
+      };
+
+      const result = await tts.textToSpeech({
+        text: "hello",
+        cfg,
+      });
+
+      expect(result.success).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const firstBody = getFetchRequestBody(
+        fetchMock as unknown as { mock: { calls: unknown[][] } },
+        0,
+      );
+      const secondBody = getFetchRequestBody(
+        fetchMock as unknown as { mock: { calls: unknown[][] } },
+        1,
+      );
+      expect(firstBody.instructions).toBe("calm");
+      expect(firstBody.stream).toBe(true);
+      expect(secondBody.instructions).toBe("calm");
+      expect(secondBody.stream).toBeUndefined();
     });
   });
 
