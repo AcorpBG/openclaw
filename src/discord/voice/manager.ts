@@ -659,7 +659,9 @@ export class DiscordVoiceManager {
       cfg: this.params.cfg,
       override: this.params.discordConfig.voice?.tts,
     });
-    const directive = parseTtsDirectives(replyText, ttsConfig.modelOverrides);
+    const directive = parseTtsDirectives(replyText, ttsConfig.modelOverrides, {
+      openaiBaseUrl: ttsConfig.openai.baseUrl,
+    });
     const speakText = directive.overrides.ttsText ?? directive.cleanedText.trim();
     if (!speakText) {
       logVoiceVerbose(

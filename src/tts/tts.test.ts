@@ -299,7 +299,7 @@ describe("tts", () => {
       const input =
         "Hello [[tts:provider=elevenlabs voiceId=pMsXgVXv3BLzUgSXRplE stability=0.4 speed=1.1]] world\n\n" +
         "[[tts:text]](laughs) Read the song once more.[[/tts:text]]";
-      const result = parseTtsDirectives(input, policy);
+      const result = parseTtsDirectives(input, policy, {});
 
       expect(result.cleanedText).not.toContain("[[tts:");
       expect(result.ttsText).toBe("(laughs) Read the song once more.");
@@ -312,7 +312,7 @@ describe("tts", () => {
     it("parses OpenAI instruction and stream directives when allowed", () => {
       const policy = resolveModelOverridePolicy({ enabled: true });
       const input = "Hello [[tts:instructions=calm stream=on]] world";
-      const result = parseTtsDirectives(input, policy);
+      const result = parseTtsDirectives(input, policy, {});
 
       expect(result.overrides.openai?.instructions).toBe("calm");
       expect(result.overrides.openai?.stream).toBe(true);
@@ -321,7 +321,7 @@ describe("tts", () => {
     it("parses OpenAI responseFormat/speed/streamFormat directives when allowed", () => {
       const policy = resolveModelOverridePolicy({ enabled: true });
       const input = "Hello [[tts:responseFormat=wav openai_speed=1.75 streamFormat=audio]] world";
-      const result = parseTtsDirectives(input, policy);
+      const result = parseTtsDirectives(input, policy, {});
 
       expect(result.overrides.openai?.responseFormat).toBe("wav");
       expect(result.overrides.openai?.speed).toBe(1.75);
@@ -338,6 +338,18 @@ describe("tts", () => {
 
       expect(result.overrides.openai?.model).toBe("qwen3-tts");
       expect(result.overrides.elevenlabs?.modelId).toBeUndefined();
+    });
+
+    it("routes explicit ElevenLabs model directives before OpenAI fallback on custom endpoints", () => {
+      const policy = resolveModelOverridePolicy({ enabled: true });
+      const input = "Hello [[tts:model_id=eleven_multilingual_v2]] world";
+
+      const result = parseTtsDirectives(input, policy, {
+        openaiBaseUrl: "http://localhost:8880/v1",
+      });
+
+      expect(result.overrides.elevenlabs?.modelId).toBe("eleven_multilingual_v2");
+      expect(result.overrides.openai?.model).toBeUndefined();
     });
 
     it("routes voice directives using configured custom openai baseUrl", () => {
@@ -359,7 +371,7 @@ describe("tts", () => {
         allowStream: false,
       });
       const input = "Hello [[tts:instructions=calm stream=on]] world";
-      const result = parseTtsDirectives(input, policy);
+      const result = parseTtsDirectives(input, policy, {});
 
       expect(result.overrides.openai?.instructions).toBeUndefined();
       expect(result.overrides.openai?.stream).toBeUndefined();
@@ -373,7 +385,7 @@ describe("tts", () => {
         allowStreamFormat: false,
       });
       const input = "Hello [[tts:responseFormat=wav openai_speed=1.75 streamFormat=audio]] world";
-      const result = parseTtsDirectives(input, policy);
+      const result = parseTtsDirectives(input, policy, {});
 
       expect(result.overrides.openai?.responseFormat).toBeUndefined();
       expect(result.overrides.openai?.speed).toBeUndefined();
@@ -383,7 +395,7 @@ describe("tts", () => {
     it("accepts edge as provider override", () => {
       const policy = resolveModelOverridePolicy({ enabled: true, allowProvider: true });
       const input = "Hello [[tts:provider=edge]] world";
-      const result = parseTtsDirectives(input, policy);
+      const result = parseTtsDirectives(input, policy, {});
 
       expect(result.overrides.provider).toBe("edge");
     });
@@ -391,7 +403,7 @@ describe("tts", () => {
     it("rejects provider override by default while keeping voice overrides enabled", () => {
       const policy = resolveModelOverridePolicy({ enabled: true });
       const input = "Hello [[tts:provider=edge voice=alloy]] world";
-      const result = parseTtsDirectives(input, policy);
+      const result = parseTtsDirectives(input, policy, {});
 
       expect(result.overrides.provider).toBeUndefined();
       expect(result.overrides.openai?.voice).toBe("alloy");
@@ -400,7 +412,7 @@ describe("tts", () => {
     it("keeps text intact when overrides are disabled", () => {
       const policy = resolveModelOverridePolicy({ enabled: false });
       const input = "Hello [[tts:voice=alloy]] world";
-      const result = parseTtsDirectives(input, policy);
+      const result = parseTtsDirectives(input, policy, {});
 
       expect(result.cleanedText).toBe(input);
       expect(result.overrides.provider).toBeUndefined();
