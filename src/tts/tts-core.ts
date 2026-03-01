@@ -845,37 +845,53 @@ export async function openaiTTS(params: {
         signal: controller.signal,
       });
 
-    const shouldRequestStream = stream === true;
-    const response = await makeRequest(shouldRequestStream);
+    const toResult = async (res: Response) => {
+      const audioBuffer = Buffer.from(await res.arrayBuffer());
+      return {
+        audioBuffer,
+        outputFormat: resolveOpenAiReturnedFormat({
+          requested: responseFormat,
+          contentType: res.headers?.get?.("content-type") ?? null,
+          audioBuffer,
+        }),
+      };
+    };
 
-    if (!response.ok) {
-      if (shouldRequestStream && streamFallbackToBuffered) {
-        const fallback = await makeRequest(false);
-        if (!fallback.ok) {
-          throw new Error(`OpenAI TTS API error (${fallback.status})`);
+    const attemptBufferedFallback = async (cause?: unknown) => {
+      const fallback = await makeRequest(false);
+      if (!fallback.ok) {
+        if (cause != null) {
+          throw new Error(`OpenAI TTS API error (${fallback.status})`, { cause });
         }
-        const fallbackBuffer = Buffer.from(await fallback.arrayBuffer());
-        return {
-          audioBuffer: fallbackBuffer,
-          outputFormat: resolveOpenAiReturnedFormat({
-            requested: responseFormat,
-            contentType: fallback.headers?.get?.("content-type") ?? null,
-            audioBuffer: fallbackBuffer,
-          }),
-        };
+        throw new Error(`OpenAI TTS API error (${fallback.status})`);
       }
-      throw new Error(`OpenAI TTS API error (${response.status})`);
+      return toResult(fallback);
+    };
+
+    const shouldRequestStream = stream === true;
+    if (shouldRequestStream) {
+      try {
+        const streamResponse = await makeRequest(true);
+        if (!streamResponse.ok) {
+          if (streamFallbackToBuffered) {
+            return attemptBufferedFallback();
+          }
+          throw new Error(`OpenAI TTS API error (${streamResponse.status})`);
+        }
+        return toResult(streamResponse);
+      } catch (err) {
+        if (streamFallbackToBuffered) {
+          return attemptBufferedFallback(err);
+        }
+        throw err;
+      }
     }
 
-    const audioBuffer = Buffer.from(await response.arrayBuffer());
-    return {
-      audioBuffer,
-      outputFormat: resolveOpenAiReturnedFormat({
-        requested: responseFormat,
-        contentType: response.headers?.get?.("content-type") ?? null,
-        audioBuffer,
-      }),
-    };
+    const response = await makeRequest(false);
+    if (!response.ok) {
+      throw new Error(`OpenAI TTS API error (${response.status})`);
+    }
+    return toResult(response);
   } finally {
     clearTimeout(timeout);
   }

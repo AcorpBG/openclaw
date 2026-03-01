@@ -451,6 +451,41 @@ describe("tts", () => {
       expect(secondBody.stream).toBeUndefined();
     });
 
+    it("falls back to non-stream request when stream request throws", async () => {
+      const abortErr = new Error("aborted");
+      abortErr.name = "AbortError";
+      const fetchMock = vi
+        .fn()
+        .mockRejectedValueOnce(abortErr)
+        .mockResolvedValueOnce({
+          ok: true,
+          arrayBuffer: async () => new ArrayBuffer(1),
+        });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await openaiTTS({
+        text: "hello",
+        apiKey: "k",
+        model: "gpt-4o-mini-tts",
+        voice: "alloy",
+        stream: true,
+        responseFormat: "mp3",
+        timeoutMs: 10_000,
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const firstBody = getFetchRequestBody(
+        fetchMock as unknown as { mock: { calls: unknown[][] } },
+        0,
+      );
+      const secondBody = getFetchRequestBody(
+        fetchMock as unknown as { mock: { calls: unknown[][] } },
+        1,
+      );
+      expect(firstBody.stream).toBe(true);
+      expect(secondBody.stream).toBeUndefined();
+    });
+
     it("rejects unsupported instructions+model combinations", async () => {
       await withEnv({ OPENAI_TTS_BASE_URL: undefined }, async () => {
         await expect(
