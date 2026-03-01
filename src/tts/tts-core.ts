@@ -528,14 +528,16 @@ function inferOpenAiFormatFromBytes(audio: Buffer): OpenAiTtsResponseFormat | un
   if (audio.length >= 4 && audio.subarray(0, 4).toString("ascii") === "OggS") {
     return "opus";
   }
-  // ADTS AAC syncword is 0xFFFx (upper 12 bits all ones).
-  if (audio.length >= 2 && audio[0] === 0xff && (audio[1] & 0xf0) === 0xf0) {
-    return "aac";
+  if (audio.length >= 3 && audio.subarray(0, 3).toString("ascii") === "ID3") {
+    return "mp3";
   }
-  if (
-    (audio.length >= 3 && audio.subarray(0, 3).toString("ascii") === "ID3") ||
-    (audio.length >= 2 && audio[0] === 0xff && (audio[1] & 0xe0) === 0xe0)
-  ) {
+  // MP3 frame headers can start with 0xFF syncword (e.g. 0xFF 0xFB).
+  // Distinguish MP3 from AAC ADTS by layer bits: MP3 layer bits are not 00, while AAC ADTS layer bits are 00.
+  if (audio.length >= 2 && audio[0] === 0xff && (audio[1] & 0xf0) === 0xf0) {
+    const adtsLayerBits = audio[1] & 0x06;
+    if (adtsLayerBits === 0x00) {
+      return "aac";
+    }
     return "mp3";
   }
   return undefined;

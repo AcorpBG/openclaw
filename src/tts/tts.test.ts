@@ -575,6 +575,27 @@ describe("tts", () => {
       ).resolves.toMatchObject({ outputFormat: "aac" });
     });
 
+    it("classifies raw MP3 frame headers as mp3 (not aac)", async () => {
+      const mp3Frame = new Uint8Array([0xff, 0xfb, 0x90, 0x64, 0x00, 0x00]);
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: { get: () => null },
+        arrayBuffer: async () => mp3Frame.buffer,
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        openaiTTS({
+          text: "hello",
+          apiKey: "k",
+          model: "gpt-4o-mini-tts",
+          voice: "alloy",
+          responseFormat: "mp3",
+          timeoutMs: 10_000,
+        }),
+      ).resolves.toMatchObject({ outputFormat: "mp3" });
+    });
+
     it("keeps strict validation when explicit baseUrl is default OpenAI endpoint", async () => {
       await withEnv({ OPENAI_TTS_BASE_URL: "http://localhost:8880/v1" }, async () => {
         await expect(
