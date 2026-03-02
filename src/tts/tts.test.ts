@@ -561,20 +561,73 @@ describe("tts", () => {
       expect(secondInit?.signal?.aborted).toBe(false);
     });
 
-    it("rejects unsupported instructions+model combinations", async () => {
-      await withEnv({ OPENAI_TTS_BASE_URL: undefined }, async () => {
-        await expect(
-          openaiTTS({
-            text: "hello",
-            apiKey: "k",
-            model: "tts-1",
-            voice: "alloy",
-            instructions: "calm",
-            responseFormat: "mp3",
-            timeoutMs: 10_000,
-          }),
-        ).rejects.toThrow("OpenAI instructions are unsupported for model tts-1");
+    it("retries once without instructions when upstream rejects instructions", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 400,
+          text: async () => '{"error":{"message":"Unsupported parameter: instructions"}}',
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          arrayBuffer: async () => new ArrayBuffer(1),
+        });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await openaiTTS({
+        text: "hello",
+        apiKey: "k",
+        baseUrl: "http://localhost:8880/v1",
+        model: "custom-model",
+        voice: "custom-voice",
+        instructions: "calm",
+        responseFormat: "mp3",
+        timeoutMs: 10_000,
       });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const firstBody = getFetchRequestBody(
+        fetchMock as unknown as { mock: { calls: unknown[][] } },
+        0,
+      );
+      const secondBody = getFetchRequestBody(
+        fetchMock as unknown as { mock: { calls: unknown[][] } },
+        1,
+      );
+      expect(firstBody.instructions).toBe("calm");
+      expect(secondBody.instructions).toBeUndefined();
+    });
+
+    it("does not retry endlessly after one unsupported-instructions retry", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 400,
+          text: async () => '{"error":{"message":"Unsupported parameter: instructions"}}',
+        })
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 400,
+          text: async () => '{"error":{"message":"Unsupported parameter: instructions"}}',
+        });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        openaiTTS({
+          text: "hello",
+          apiKey: "k",
+          baseUrl: "http://localhost:8880/v1",
+          model: "custom-model",
+          voice: "custom-voice",
+          instructions: "calm",
+          responseFormat: "mp3",
+          timeoutMs: 10_000,
+        }),
+      ).rejects.toThrow("OpenAI TTS API error (400)");
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
     it("rejects unsupported sse stream format", async () => {
@@ -965,6 +1018,37 @@ describe("tts", () => {
       expect(body.stream).toBeUndefined();
     });
 
+    it("keeps tts-1 working when global OpenAI instructions are configured", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const cfg: OpenClawConfig = {
+        agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+        messages: {
+          tts: {
+            provider: "openai",
+            openai: {
+              apiKey: "test-key",
+              model: "tts-1",
+              voice: "alloy",
+              instructions: "calm",
+            },
+          },
+        },
+      };
+
+      const result = await tts.textToSpeech({ text: "hello", cfg });
+
+      expect(result.success).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
+      expect(body.model).toBe("tts-1");
+      expect(body.instructions).toBeUndefined();
+    });
+
     it("uses configured OpenAI baseUrl when provided", async () => {
       const fetchMock = vi.fn().mockResolvedValue({
         ok: true,
@@ -982,7 +1066,6 @@ describe("tts", () => {
               baseUrl: "http://localhost:8880/v1",
               model: "custom-model",
               voice: "custom-voice",
-              instructions: "calm",
               stream: true,
             },
           },
@@ -995,18 +1078,15 @@ describe("tts", () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(fetchMock.mock.calls[0]?.[0]).toBe("http://localhost:8880/v1/audio/speech");
       const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
-      expect(body.instructions).toBe("calm");
+      expect(body.instructions).toBeUndefined();
       expect(body.stream).toBe(true);
     });
 
-    it("applies configured instructions and stream with buffered fallback", async () => {
-      const fetchMock = vi
-        .fn()
-        .mockResolvedValueOnce({ ok: false, status: 400 })
-        .mockResolvedValueOnce({
-          ok: true,
-          arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
-        });
+    it("passes explicit instructions override for compatible models", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+      });
       globalThis.fetch = fetchMock as unknown as typeof fetch;
 
       const cfg: OpenClawConfig = {
@@ -1018,8 +1098,6 @@ describe("tts", () => {
               apiKey: "test-key",
               model: "gpt-4o-mini-tts",
               voice: "alloy",
-              instructions: "calm",
-              stream: true,
             },
           },
         },
@@ -1028,7 +1106,108 @@ describe("tts", () => {
       const result = await tts.textToSpeech({
         text: "hello",
         cfg,
+        overrides: { openai: { instructions: "speak warmly" } },
       });
+
+      expect(result.success).toBe(true);
+      const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
+      expect(body.instructions).toBe("speak warmly");
+    });
+
+    it("omits global instructions automatically for tts-1", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const cfg: OpenClawConfig = {
+        agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+        messages: {
+          tts: {
+            provider: "openai",
+            openai: {
+              apiKey: "test-key",
+              model: "tts-1",
+              voice: "alloy",
+              instructions: "calm",
+            },
+          },
+        },
+      };
+
+      const result = await tts.textToSpeech({ text: "hello", cfg });
+
+      expect(result.success).toBe(true);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
+      expect(body.instructions).toBeUndefined();
+    });
+
+    it("passes explicit directive instructions for compatible models", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const cfg: OpenClawConfig = {
+        agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+        messages: {
+          tts: {
+            provider: "openai",
+            openai: {
+              apiKey: "test-key",
+              model: "gpt-4o-mini-tts",
+              voice: "alloy",
+            },
+          },
+        },
+      };
+
+      const result = await tts.textToSpeech({
+        text: "hello",
+        cfg,
+        overrides: { openai: { instructions: "calm and warm" } },
+      });
+
+      expect(result.success).toBe(true);
+      const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
+      expect(body.instructions).toBe("calm and warm");
+    });
+
+    it("retries once without instructions when upstream rejects instructions", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 400,
+          text: async () =>
+            JSON.stringify({ error: { message: "Unsupported parameter: 'instructions'" } }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+        });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const cfg: OpenClawConfig = {
+        agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+        messages: {
+          tts: {
+            provider: "openai",
+            edge: { enabled: false },
+            openai: {
+              apiKey: "test-key",
+              model: "gpt-4o-mini-tts",
+              voice: "alloy",
+              instructions: "calm",
+            },
+          },
+        },
+      };
+
+      const result = await tts.textToSpeech({ text: "hello", cfg });
 
       expect(result.success).toBe(true);
       expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -1041,9 +1220,46 @@ describe("tts", () => {
         1,
       );
       expect(firstBody.instructions).toBe("calm");
-      expect(firstBody.stream).toBe(true);
-      expect(secondBody.instructions).toBe("calm");
-      expect(secondBody.stream).toBeUndefined();
+      expect(secondBody.instructions).toBeUndefined();
+    });
+
+    it("does not loop retries when instructions remain unsupported", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 400,
+          text: async () =>
+            JSON.stringify({ error: { message: "Unsupported parameter: instructions" } }),
+        })
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 400,
+          text: async () =>
+            JSON.stringify({ error: { message: "Unsupported parameter: instructions" } }),
+        });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const cfg: OpenClawConfig = {
+        agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+        messages: {
+          tts: {
+            provider: "openai",
+            edge: { enabled: false },
+            openai: {
+              apiKey: "test-key",
+              model: "gpt-4o-mini-tts",
+              voice: "alloy",
+              instructions: "calm",
+            },
+          },
+        },
+      };
+
+      const result = await tts.textToSpeech({ text: "hello", cfg });
+
+      expect(result.success).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     });
   });
 

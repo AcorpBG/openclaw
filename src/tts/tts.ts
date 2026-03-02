@@ -65,6 +65,8 @@ const DEFAULT_ELEVENLABS_VOICE_ID = "pMsXgVXv3BLzUgSXRplE";
 const DEFAULT_ELEVENLABS_MODEL_ID = "eleven_multilingual_v2";
 const DEFAULT_OPENAI_MODEL = "gpt-4o-mini-tts";
 const DEFAULT_OPENAI_VOICE = "alloy";
+const DEFAULT_OPENAI_TTS_BASE_URL = "https://api.openai.com/v1";
+const OPENAI_MODELS_WITH_IMPLICIT_INSTRUCTIONS = new Set<string>(["gpt-4o-mini-tts"]);
 const DEFAULT_OPENAI_RESPONSE_FORMAT: OpenAiTtsResponseFormat = "mp3";
 const DEFAULT_OPENAI_STREAM_FORMAT: OpenAiTtsStreamFormat = "audio";
 const DEFAULT_OPENAI_SPEED = 1;
@@ -691,6 +693,45 @@ function resolveTtsStreamEnabled(params: {
   return params.stream?.enabled ?? params.overrides?.openai?.stream ?? params.config.openai.stream;
 }
 
+function resolveOpenAiBaseUrl(baseUrl?: string): string {
+  return (
+    baseUrl?.trim() ||
+    process.env.OPENAI_TTS_BASE_URL?.trim() ||
+    DEFAULT_OPENAI_TTS_BASE_URL
+  ).replace(/\/+$/, "");
+}
+
+function supportsImplicitOpenAiInstructions(model: string, baseUrl?: string): boolean {
+  if (resolveOpenAiBaseUrl(baseUrl) !== DEFAULT_OPENAI_TTS_BASE_URL) {
+    return false;
+  }
+  return OPENAI_MODELS_WITH_IMPLICIT_INSTRUCTIONS.has(model);
+}
+
+function resolveOpenAiInstructions(params: {
+  model: string;
+  baseUrl?: string;
+  configInstructions?: string;
+  overrideInstructions?: string;
+  hasExplicitOverride: boolean;
+}): { instructions?: string; explicit: boolean } {
+  if (params.hasExplicitOverride) {
+    return {
+      instructions: params.overrideInstructions?.trim() || undefined,
+      explicit: true,
+    };
+  }
+
+  const normalized = params.configInstructions?.trim();
+  if (!normalized) {
+    return { instructions: undefined, explicit: false };
+  }
+  if (!supportsImplicitOpenAiInstructions(params.model, params.baseUrl)) {
+    return { instructions: undefined, explicit: false };
+  }
+  return { instructions: normalized, explicit: false };
+}
+
 function resolveOpenAIDirectives(params: {
   config: ResolvedTtsConfig;
   channelId?: string | null;
@@ -732,11 +773,26 @@ function resolveOpenAIDirectives(params: {
     throw new Error("openai: speed must be between 0.25 and 4.0");
   }
 
+  const model = params.overrides?.openai?.model ?? params.config.openai.model;
+  const baseUrl = params.config.openai.baseUrl;
+  const hasExplicitInstructionOverride = Object.prototype.hasOwnProperty.call(
+    params.overrides?.openai ?? {},
+    "instructions",
+  );
+  const instructions = resolveOpenAiInstructions({
+    model,
+    baseUrl,
+    configInstructions: params.config.openai.instructions,
+    overrideInstructions: params.overrides?.openai?.instructions,
+    hasExplicitOverride: hasExplicitInstructionOverride,
+  });
+
   return {
-    baseUrl: params.config.openai.baseUrl,
-    model: params.overrides?.openai?.model ?? params.config.openai.model,
+    baseUrl,
+    model,
     voice: params.overrides?.openai?.voice ?? params.config.openai.voice,
-    instructions: params.overrides?.openai?.instructions ?? params.config.openai.instructions,
+    instructions: instructions.instructions,
+    instructionsExplicit: instructions.explicit,
     stream: params.overrides?.openai?.stream ?? params.config.openai.stream,
     responseFormat,
     speed,
