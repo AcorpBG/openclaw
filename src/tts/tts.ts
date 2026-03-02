@@ -131,10 +131,13 @@ export type ResolvedTtsConfig = {
     voice: string;
     instructions?: string;
     stream: boolean;
+    streamConfigured: boolean;
     responseFormat: OpenAiTtsResponseFormat;
     responseFormatConfigured: boolean;
     speed: number;
+    speedConfigured: boolean;
     streamFormat: OpenAiTtsStreamFormat;
+    streamFormatConfigured: boolean;
   };
   edge: {
     enabled: boolean;
@@ -333,6 +336,9 @@ function resolveModelOverridePolicy(
 
 export function resolveTtsConfig(cfg: OpenClawConfig): ResolvedTtsConfig {
   const raw: TtsConfig = cfg.messages?.tts ?? {};
+  const rawOpenAi = raw.openai ?? {};
+  const hasOpenAiSetting = (key: keyof NonNullable<TtsConfig["openai"]>) =>
+    Object.prototype.hasOwnProperty.call(rawOpenAi, key);
   const providerSource = raw.provider ? "config" : "default";
   const edgeOutputFormat = raw.edge?.outputFormat?.trim();
   const auto = normalizeTtsAutoMode(raw.auto) ?? (raw.enabled ? "always" : "off");
@@ -371,10 +377,13 @@ export function resolveTtsConfig(cfg: OpenClawConfig): ResolvedTtsConfig {
       voice: raw.openai?.voice ?? DEFAULT_OPENAI_VOICE,
       instructions: raw.openai?.instructions?.trim() || undefined,
       stream: raw.openai?.stream ?? false,
+      streamConfigured: hasOpenAiSetting("stream"),
       responseFormat: raw.openai?.responseFormat ?? DEFAULT_OPENAI_RESPONSE_FORMAT,
       responseFormatConfigured: Boolean(raw.openai?.responseFormat),
       speed: raw.openai?.speed ?? DEFAULT_OPENAI_SPEED,
+      speedConfigured: hasOpenAiSetting("speed"),
       streamFormat: raw.openai?.streamFormat ?? DEFAULT_OPENAI_STREAM_FORMAT,
+      streamFormatConfigured: hasOpenAiSetting("streamFormat"),
     },
     edge: {
       enabled: raw.edge?.enabled ?? true,
@@ -739,10 +748,29 @@ function resolveOpenAIDirectives(params: {
   telephony?: boolean;
   overrides?: TtsDirectiveOverrides;
 }) {
-  const responseFormat =
-    params.overrides?.openai?.responseFormat ??
-    resolveOpenAiResponseFormat(params.config, params.channelId);
-  if (!isValidOpenAIResponseFormat(responseFormat)) {
+  const openaiOverrides = params.overrides?.openai ?? {};
+  const hasOverride = (key: keyof NonNullable<TtsDirectiveOverrides["openai"]>) =>
+    Object.prototype.hasOwnProperty.call(openaiOverrides, key);
+  const model = params.overrides?.openai?.model ?? params.config.openai.model;
+  const baseUrl = params.config.openai.baseUrl;
+  const instructions = resolveOpenAiInstructions({
+    model,
+    baseUrl,
+    configInstructions: params.config.openai.instructions,
+    overrideInstructions: params.overrides?.openai?.instructions,
+    hasExplicitOverride: hasOverride("instructions"),
+  });
+  const stream = params.overrides?.openai?.stream ?? params.config.openai.stream;
+  const responseFormatExplicit =
+    params.telephony === true ||
+    hasOverride("responseFormat") ||
+    params.config.openai.responseFormatConfigured;
+  const responseFormat = responseFormatExplicit
+    ? params.telephony === true
+      ? TELEPHONY_OUTPUT.openai.format
+      : (params.overrides?.openai?.responseFormat ?? params.config.openai.responseFormat)
+    : undefined;
+  if (responseFormat && !isValidOpenAIResponseFormat(responseFormat)) {
     throw new Error(
       `openai: invalid responseFormat "${String(responseFormat)}"; valid values: ${OPENAI_TTS_RESPONSE_FORMATS.join(", ")}`,
     );
@@ -753,39 +781,29 @@ function resolveOpenAIDirectives(params: {
     );
   }
 
-  const streamFormat = params.overrides?.openai?.streamFormat ?? params.config.openai.streamFormat;
-  if (!isValidOpenAIStreamFormat(streamFormat)) {
+  const speedExplicit = hasOverride("speed") || params.config.openai.speedConfigured;
+  const speed = speedExplicit
+    ? (params.overrides?.openai?.speed ?? params.config.openai.speed)
+    : undefined;
+  if (speed != null && (!Number.isFinite(speed) || speed < 0.25 || speed > 4)) {
+    throw new Error("openai: speed must be between 0.25 and 4.0");
+  }
+
+  const streamFormatExplicit =
+    hasOverride("streamFormat") || params.config.openai.streamFormatConfigured;
+  const streamFormat = streamFormatExplicit
+    ? (params.overrides?.openai?.streamFormat ?? params.config.openai.streamFormat)
+    : undefined;
+  if (streamFormat && !isValidOpenAIStreamFormat(streamFormat)) {
     throw new Error(
       `openai: invalid streamFormat "${String(streamFormat)}"; valid values: ${OPENAI_TTS_STREAM_FORMATS.join(", ")}`,
     );
   }
-  if (
-    (params.streaming || params.config.openai.stream || params.overrides?.openai?.stream) &&
-    streamFormat === "sse"
-  ) {
+  if ((params.streaming || stream) && streamFormat === "sse") {
     throw new Error(
       "openai: streamFormat=sse is not supported by OpenClaw audio playback yet; use streamFormat=audio.",
     );
   }
-
-  const speed = params.overrides?.openai?.speed ?? params.config.openai.speed;
-  if (!Number.isFinite(speed) || speed < 0.25 || speed > 4) {
-    throw new Error("openai: speed must be between 0.25 and 4.0");
-  }
-
-  const model = params.overrides?.openai?.model ?? params.config.openai.model;
-  const baseUrl = params.config.openai.baseUrl;
-  const hasExplicitInstructionOverride = Object.prototype.hasOwnProperty.call(
-    params.overrides?.openai ?? {},
-    "instructions",
-  );
-  const instructions = resolveOpenAiInstructions({
-    model,
-    baseUrl,
-    configInstructions: params.config.openai.instructions,
-    overrideInstructions: params.overrides?.openai?.instructions,
-    hasExplicitOverride: hasExplicitInstructionOverride,
-  });
 
   return {
     baseUrl,
@@ -793,7 +811,7 @@ function resolveOpenAIDirectives(params: {
     voice: params.overrides?.openai?.voice ?? params.config.openai.voice,
     instructions: instructions.instructions,
     instructionsExplicit: instructions.explicit,
-    stream: params.overrides?.openai?.stream ?? params.config.openai.stream,
+    stream,
     responseFormat,
     speed,
     streamFormat,

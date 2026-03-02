@@ -598,7 +598,7 @@ function inferOpenAiFormatFromBytes(audio: Buffer): OpenAiTtsResponseFormat | un
 }
 
 function resolveOpenAiReturnedFormat(params: {
-  requested: OpenAiTtsResponseFormat;
+  requested?: OpenAiTtsResponseFormat;
   contentType: string | null;
   audioBuffer?: Buffer;
 }): OpenAiTtsResponseFormat {
@@ -606,13 +606,13 @@ function resolveOpenAiReturnedFormat(params: {
   const fromBytes = params.audioBuffer ? inferOpenAiFormatFromBytes(params.audioBuffer) : undefined;
   const detected = fromBytes ?? fromContentType;
 
-  if (detected && detected !== params.requested) {
+  if (params.requested && detected && detected !== params.requested) {
     throw new Error(
       `OpenAI TTS returned ${detected} but ${params.requested} was requested. ` +
         `Align messages.tts.openai.responseFormat with upstream output or fix the upstream endpoint.`,
     );
   }
-  return detected ?? params.requested;
+  return detected ?? params.requested ?? "mp3";
 }
 
 async function buildOpenAiTtsApiError(response: Response): Promise<Error> {
@@ -862,7 +862,7 @@ export async function openaiTTS(params: {
   apiKey: string;
   model: string;
   voice: string;
-  responseFormat: OpenAiTtsResponseFormat;
+  responseFormat?: OpenAiTtsResponseFormat;
   speed?: number;
   instructions?: string;
   instructionsExplicit?: boolean;
@@ -928,11 +928,13 @@ export async function openaiTTS(params: {
           model,
           input: text,
           voice,
-          response_format: responseFormat,
-          speed,
-          instructions: includeInstructions ? normalizedInstructions : undefined,
-          stream: enableStream ? true : undefined,
-          stream_format: enableStream ? streamFormat : undefined,
+          ...(responseFormat != null ? { response_format: responseFormat } : {}),
+          ...(speed != null ? { speed } : {}),
+          ...(includeInstructions && normalizedInstructions
+            ? { instructions: normalizedInstructions }
+            : {}),
+          ...(enableStream ? { stream: true } : {}),
+          ...(enableStream && streamFormat ? { stream_format: streamFormat } : {}),
         }),
         signal,
       });
@@ -1023,7 +1025,7 @@ export async function openaiTTSReadable(params: {
   apiKey: string;
   model: string;
   voice: string;
-  responseFormat: OpenAiTtsResponseFormat;
+  responseFormat?: OpenAiTtsResponseFormat;
   speed?: number;
   instructions?: string;
   instructionsExplicit?: boolean;
@@ -1087,11 +1089,13 @@ export async function openaiTTSReadable(params: {
           model,
           input: text,
           voice,
-          response_format: responseFormat,
-          speed,
-          instructions: includeInstructions ? normalizedInstructions : undefined,
+          ...(responseFormat != null ? { response_format: responseFormat } : {}),
+          ...(speed != null ? { speed } : {}),
+          ...(includeInstructions && normalizedInstructions
+            ? { instructions: normalizedInstructions }
+            : {}),
           stream: true,
-          stream_format: streamFormat,
+          ...(streamFormat ? { stream_format: streamFormat } : {}),
         }),
         signal: controller.signal,
       });
