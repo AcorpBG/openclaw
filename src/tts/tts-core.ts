@@ -489,15 +489,16 @@ function supportsOpenAIStreaming(model: string, baseUrl?: string): boolean {
 
 function isUnsupportedInstructionsApiError(error: Error): boolean {
   const normalized = error.message.toLowerCase();
-  if (!normalized.includes("instruction")) {
-    return false;
-  }
-  return (
+  const hasUnsupportedSignal =
     normalized.includes("unsupported") ||
     normalized.includes("not supported") ||
     normalized.includes("unknown parameter") ||
-    normalized.includes("unrecognized request argument") ||
-    normalized.includes("extra inputs are not permitted")
+    normalized.includes("unrecognized request argument");
+
+  return (
+    (normalized.includes("instruction") && hasUnsupportedSignal) ||
+    normalized.includes("extra inputs are not permitted") ||
+    normalized.includes("additional properties are not allowed")
   );
 }
 
@@ -864,6 +865,7 @@ export async function openaiTTS(params: {
   responseFormat: OpenAiTtsResponseFormat;
   speed?: number;
   instructions?: string;
+  instructionsExplicit?: boolean;
   stream?: boolean;
   streamFormat?: OpenAiTtsStreamFormat;
   streamFallbackToBuffered?: boolean;
@@ -878,6 +880,7 @@ export async function openaiTTS(params: {
     responseFormat,
     speed,
     instructions,
+    instructionsExplicit = false,
     stream,
     streamFormat,
     streamFallbackToBuffered = true,
@@ -949,6 +952,7 @@ export async function openaiTTS(params: {
         const apiError = await buildOpenAiTtsApiError(response);
         if (
           includeInstructions &&
+          !instructionsExplicit &&
           !retriedWithoutInstructions &&
           isUnsupportedInstructionsApiError(apiError)
         ) {
@@ -1022,6 +1026,7 @@ export async function openaiTTSReadable(params: {
   responseFormat: OpenAiTtsResponseFormat;
   speed?: number;
   instructions?: string;
+  instructionsExplicit?: boolean;
   streamFormat?: OpenAiTtsStreamFormat;
   timeoutMs: number;
   baseUrl?: string;
@@ -1034,6 +1039,7 @@ export async function openaiTTSReadable(params: {
     responseFormat,
     speed,
     instructions,
+    instructionsExplicit = false,
     streamFormat,
     timeoutMs,
     baseUrl,
@@ -1097,6 +1103,7 @@ export async function openaiTTSReadable(params: {
       const apiError = await buildOpenAiTtsApiError(response);
       if (
         includeInstructions &&
+        !instructionsExplicit &&
         !retriedWithoutInstructions &&
         isUnsupportedInstructionsApiError(apiError)
       ) {

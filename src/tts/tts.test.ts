@@ -630,6 +630,71 @@ describe("tts", () => {
       expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
+    it("does not drop explicit instructions on unsupported-parameter errors", async () => {
+      const fetchMock = vi.fn().mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        text: async () => '{"error":{"message":"Unsupported parameter: instructions"}}',
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await expect(
+        openaiTTS({
+          text: "hello",
+          apiKey: "k",
+          baseUrl: "http://localhost:8880/v1",
+          model: "custom-model",
+          voice: "custom-voice",
+          instructions: "calm",
+          instructionsExplicit: true,
+          responseFormat: "mp3",
+          timeoutMs: 10_000,
+        }),
+      ).rejects.toThrow("OpenAI TTS API error (400)");
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
+      expect(body.instructions).toBe("calm");
+    });
+
+    it("retries when upstream returns generic extra-input validation errors", async () => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 400,
+          text: async () => '{"error":{"message":"Extra inputs are not permitted"}}',
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          arrayBuffer: async () => new ArrayBuffer(1),
+        });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      await openaiTTS({
+        text: "hello",
+        apiKey: "k",
+        baseUrl: "http://localhost:8880/v1",
+        model: "custom-model",
+        voice: "custom-voice",
+        instructions: "calm",
+        responseFormat: "mp3",
+        timeoutMs: 10_000,
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const firstBody = getFetchRequestBody(
+        fetchMock as unknown as { mock: { calls: unknown[][] } },
+        0,
+      );
+      const secondBody = getFetchRequestBody(
+        fetchMock as unknown as { mock: { calls: unknown[][] } },
+        1,
+      );
+      expect(firstBody.instructions).toBe("calm");
+      expect(secondBody.instructions).toBeUndefined();
+    });
+
     it("rejects unsupported sse stream format", async () => {
       await expect(
         openaiTTS({

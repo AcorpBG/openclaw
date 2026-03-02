@@ -948,6 +948,7 @@ export async function textToSpeech(params: {
           responseFormat: openaiSettings.responseFormat,
           speed: openaiSettings.speed,
           instructions: openaiSettings.instructions,
+          instructionsExplicit: openaiSettings.instructionsExplicit,
           stream: openaiSettings.stream,
           streamFormat: openaiSettings.streamFormat,
           timeoutMs: config.timeoutMs,
@@ -1064,6 +1065,7 @@ export async function textToSpeechStream(params: {
       responseFormat: openaiSettings.responseFormat,
       speed: openaiSettings.speed,
       instructions: openaiSettings.instructions,
+      instructionsExplicit: openaiSettings.instructionsExplicit,
       streamFormat: openaiSettings.streamFormat,
       timeoutMs: resolveTtsStreamTimeoutMs(config, params.stream),
     });
@@ -1239,6 +1241,7 @@ export async function textToSpeechTelephony(params: {
         responseFormat: output.format,
         speed: openaiSettings.speed,
         instructions: openaiSettings.instructions,
+        instructionsExplicit: openaiSettings.instructionsExplicit,
         stream: openaiSettings.stream,
         streamFormat: openaiSettings.streamFormat,
         timeoutMs: config.timeoutMs,
