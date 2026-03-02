@@ -975,6 +975,69 @@ describe("tts", () => {
       const consumed = await readReadable(result.stream);
       expect(consumed).toEqual(Buffer.concat([Buffer.from(chunk1), Buffer.from(chunk2)]));
     });
+
+    it("propagates upstream stream errors to consumers", async () => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([0x4f, 0x67, 0x67, 0x53]));
+          controller.error(new Error("upstream stream exploded"));
+        },
+      });
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: { get: () => "application/octet-stream" },
+        body,
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const result = await openaiTTSReadable({
+        text: "hello",
+        apiKey: "k",
+        model: "gpt-4o-mini-tts",
+        voice: "alloy",
+        responseFormat: "opus",
+        timeoutMs: 10_000,
+      });
+
+      await expect(readReadable(result.stream)).rejects.toThrow("upstream stream exploded");
+    });
+
+    it("tears down upstream body when prefix sniff detects a mismatch", async () => {
+      const cancelSpy = vi.fn(async () => {});
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new Uint8Array([
+              0x52, 0x49, 0x46, 0x46, 0x24, 0x00, 0x00, 0x00, 0x57, 0x41, 0x56, 0x45,
+            ]),
+          );
+        },
+        cancel: cancelSpy,
+      });
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        headers: { get: () => null },
+        body,
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const result = await openaiTTSReadable({
+        text: "hello",
+        apiKey: "k",
+        model: "gpt-4o-mini-tts",
+        voice: "alloy",
+        responseFormat: "opus",
+        timeoutMs: 10_000,
+      });
+
+      await expect(readReadable(result.stream)).rejects.toThrow(
+        "returned wav but opus was requested",
+      );
+      expect(cancelSpy).toHaveBeenCalledTimes(1);
+      const reason = cancelSpy.mock.calls[0]?.[0];
+      expect(reason).toBeInstanceOf(Error);
+      expect((reason as Error).message).toContain("returned wav but opus was requested");
+    });
   });
 
   describe("streaming plumbing", () => {
