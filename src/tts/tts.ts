@@ -67,6 +67,7 @@ const DEFAULT_OPENAI_MODEL = "gpt-4o-mini-tts";
 const DEFAULT_OPENAI_VOICE = "alloy";
 const DEFAULT_OPENAI_TTS_BASE_URL = "https://api.openai.com/v1";
 const OPENAI_MODELS_WITH_IMPLICIT_INSTRUCTIONS = new Set<string>(["gpt-4o-mini-tts"]);
+const OPENAI_MODELS_WITH_IMPLICIT_STREAM = new Set<string>(["gpt-4o-mini-tts"]);
 const DEFAULT_OPENAI_RESPONSE_FORMAT: OpenAiTtsResponseFormat = "mp3";
 const DEFAULT_OPENAI_STREAM_FORMAT: OpenAiTtsStreamFormat = "audio";
 const DEFAULT_OPENAI_SPEED = 1;
@@ -699,7 +700,21 @@ function resolveTtsStreamEnabled(params: {
   overrides?: TtsDirectiveOverrides;
   stream?: TtsStreamRequest;
 }): boolean {
-  return params.stream?.enabled ?? params.overrides?.openai?.stream ?? params.config.openai.stream;
+  if (params.stream?.enabled != null) {
+    return params.stream.enabled;
+  }
+
+  const openaiOverrides = params.overrides?.openai ?? {};
+  if (Object.prototype.hasOwnProperty.call(openaiOverrides, "stream")) {
+    return openaiOverrides.stream === true;
+  }
+
+  if (!params.config.openai.stream) {
+    return false;
+  }
+
+  const model = openaiOverrides.model ?? params.config.openai.model;
+  return supportsImplicitOpenAiStream(model, params.config.openai.baseUrl);
 }
 
 function resolveOpenAiBaseUrl(baseUrl?: string): string {
@@ -712,9 +727,16 @@ function resolveOpenAiBaseUrl(baseUrl?: string): string {
 
 function supportsImplicitOpenAiInstructions(model: string, baseUrl?: string): boolean {
   if (resolveOpenAiBaseUrl(baseUrl) !== DEFAULT_OPENAI_TTS_BASE_URL) {
-    return false;
+    return true;
   }
   return OPENAI_MODELS_WITH_IMPLICIT_INSTRUCTIONS.has(model);
+}
+
+function supportsImplicitOpenAiStream(model: string, baseUrl?: string): boolean {
+  if (resolveOpenAiBaseUrl(baseUrl) !== DEFAULT_OPENAI_TTS_BASE_URL) {
+    return true;
+  }
+  return OPENAI_MODELS_WITH_IMPLICIT_STREAM.has(model);
 }
 
 function resolveOpenAiInstructions(params: {
@@ -741,6 +763,29 @@ function resolveOpenAiInstructions(params: {
   return { instructions: normalized, explicit: false };
 }
 
+function resolveOpenAiStream(params: {
+  model: string;
+  baseUrl?: string;
+  configStream: boolean;
+  overrideStream?: boolean;
+  hasExplicitOverride: boolean;
+}): { stream: boolean; explicit: boolean } {
+  if (params.hasExplicitOverride) {
+    return {
+      stream: params.overrideStream === true,
+      explicit: true,
+    };
+  }
+
+  if (!params.configStream) {
+    return { stream: false, explicit: false };
+  }
+  if (!supportsImplicitOpenAiStream(params.model, params.baseUrl)) {
+    return { stream: false, explicit: false };
+  }
+  return { stream: true, explicit: false };
+}
+
 function resolveOpenAIDirectives(params: {
   config: ResolvedTtsConfig;
   channelId?: string | null;
@@ -760,15 +805,29 @@ function resolveOpenAIDirectives(params: {
     overrideInstructions: params.overrides?.openai?.instructions,
     hasExplicitOverride: hasOverride("instructions"),
   });
-  const stream = params.overrides?.openai?.stream ?? params.config.openai.stream;
+  const stream = resolveOpenAiStream({
+    model,
+    baseUrl,
+    configStream: params.config.openai.stream,
+    overrideStream: params.overrides?.openai?.stream,
+    hasExplicitOverride: hasOverride("stream"),
+  });
+  const useVoiceBubbleResponseFormat =
+    params.telephony !== true &&
+    Boolean(params.channelId && VOICE_BUBBLE_CHANNELS.has(params.channelId));
   const responseFormatExplicit =
     params.telephony === true ||
     hasOverride("responseFormat") ||
-    params.config.openai.responseFormatConfigured;
+    params.config.openai.responseFormatConfigured ||
+    useVoiceBubbleResponseFormat;
   const responseFormat = responseFormatExplicit
     ? params.telephony === true
       ? TELEPHONY_OUTPUT.openai.format
-      : (params.overrides?.openai?.responseFormat ?? params.config.openai.responseFormat)
+      : hasOverride("responseFormat")
+        ? params.overrides?.openai?.responseFormat
+        : params.config.openai.responseFormatConfigured
+          ? params.config.openai.responseFormat
+          : resolveOpenAiResponseFormat(params.config, params.channelId)
     : undefined;
   if (responseFormat && !isValidOpenAIResponseFormat(responseFormat)) {
     throw new Error(
@@ -799,7 +858,7 @@ function resolveOpenAIDirectives(params: {
       `openai: invalid streamFormat "${String(streamFormat)}"; valid values: ${OPENAI_TTS_STREAM_FORMATS.join(", ")}`,
     );
   }
-  if ((params.streaming || stream) && streamFormat === "sse") {
+  if ((params.streaming || stream.stream) && streamFormat === "sse") {
     throw new Error(
       "openai: streamFormat=sse is not supported by OpenClaw audio playback yet; use streamFormat=audio.",
     );
@@ -811,7 +870,7 @@ function resolveOpenAIDirectives(params: {
     voice: params.overrides?.openai?.voice ?? params.config.openai.voice,
     instructions: instructions.instructions,
     instructionsExplicit: instructions.explicit,
-    stream,
+    stream: stream.stream,
     responseFormat,
     speed,
     streamFormat,

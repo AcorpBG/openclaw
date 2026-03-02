@@ -1110,6 +1110,39 @@ describe("tts", () => {
       expect(body.speed).toBeUndefined();
     });
 
+    it("preserves voice-bubble response_format defaults when no explicit responseFormat is set", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const cfg: OpenClawConfig = {
+        agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+        messages: {
+          tts: {
+            provider: "openai",
+            openai: {
+              apiKey: "test-key",
+              model: "gpt-4o-mini-tts",
+              voice: "alloy",
+            },
+          },
+        },
+      };
+
+      const result = await tts.textToSpeech({
+        text: "hello",
+        cfg,
+        channel: "telegram",
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.outputFormat).toBe("opus");
+      const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
+      expect(body.response_format).toBe("opus");
+    });
+
     it("omits implicit optional OpenAI fields for model-only tts-1 overrides", async () => {
       const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
         const rawBody = init?.body;
@@ -1245,6 +1278,72 @@ describe("tts", () => {
       const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
       expect(body.instructions).toBeUndefined();
       expect(body.stream).toBe(true);
+    });
+
+    it("preserves configured global instructions on custom OpenAI-compatible baseUrl", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const cfg: OpenClawConfig = {
+        agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+        messages: {
+          tts: {
+            provider: "openai",
+            openai: {
+              apiKey: "test-key",
+              baseUrl: "http://localhost:8880/v1",
+              model: "custom-model",
+              voice: "custom-voice",
+              instructions: "calm and warm",
+            },
+          },
+        },
+      };
+
+      const result = await tts.textToSpeech({ text: "hello", cfg });
+
+      expect(result.success).toBe(true);
+      const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
+      expect(body.instructions).toBe("calm and warm");
+    });
+
+    it("does not inherit configured stream when model-only override changes to non-streaming model", async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+      });
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      const cfg: OpenClawConfig = {
+        agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+        messages: {
+          tts: {
+            provider: "openai",
+            openai: {
+              apiKey: "test-key",
+              model: "gpt-4o-mini-tts",
+              voice: "alloy",
+              stream: true,
+            },
+          },
+        },
+      };
+
+      const result = await tts.textToSpeechWithFallback({
+        text: "hello",
+        cfg,
+        overrides: { openai: { model: "tts-1" } },
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.delivery).toBe("buffered");
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
+      expect(body.model).toBe("tts-1");
+      expect(body.stream).toBeUndefined();
     });
 
     it("omits global instructions automatically for tts-1", async () => {
