@@ -433,7 +433,6 @@ export function parseTtsDirectives(
 export const OPENAI_TTS_MODELS = ["gpt-4o-mini-tts", "tts-1", "tts-1-hd"] as const;
 export const OPENAI_TTS_RESPONSE_FORMATS = ["mp3", "opus", "aac", "flac", "wav", "pcm"] as const;
 export const OPENAI_TTS_STREAM_FORMATS = ["audio", "sse"] as const;
-const OPENAI_TTS_MODELS_WITH_INSTRUCTIONS = new Set<string>(["gpt-4o-mini-tts"]);
 const OPENAI_TTS_MODELS_WITH_STREAMING = new Set<string>(["gpt-4o-mini-tts"]);
 const DEFAULT_OPENAI_TTS_BASE_URL = "https://api.openai.com/v1";
 
@@ -482,10 +481,6 @@ export function isValidOpenAIModel(model: string, baseUrl?: string): boolean {
     return true;
   }
   return OPENAI_TTS_MODELS.includes(model as (typeof OPENAI_TTS_MODELS)[number]);
-}
-
-export function supportsOpenAITtsInstructions(model: string, baseUrl?: string): boolean {
-  return isCustomOpenAIEndpoint(baseUrl) || OPENAI_TTS_MODELS_WITH_INSTRUCTIONS.has(model);
 }
 
 function supportsOpenAIStreaming(model: string, baseUrl?: string): boolean {
@@ -900,11 +895,6 @@ export async function openaiTTS(params: {
     throw new Error("OpenAI speed must be between 0.25 and 4.0");
   }
   const normalizedInstructions = instructions?.trim();
-  if (normalizedInstructions && !supportsOpenAITtsInstructions(model, baseUrl)) {
-    throw new Error(
-      `OpenAI instructions are unsupported for model ${model}; use gpt-4o-mini-tts or unset instructions.`,
-    );
-  }
   if (stream === true && !supportsOpenAIStreaming(model, baseUrl)) {
     throw new Error(
       `OpenAI stream mode is unsupported for model ${model}; use gpt-4o-mini-tts or disable stream.`,
@@ -1058,11 +1048,6 @@ export async function openaiTTSReadable(params: {
     throw new Error("OpenAI speed must be between 0.25 and 4.0");
   }
   const normalizedInstructions = instructions?.trim();
-  if (normalizedInstructions && !supportsOpenAITtsInstructions(model, baseUrl)) {
-    throw new Error(
-      `OpenAI instructions are unsupported for model ${model}; use gpt-4o-mini-tts or unset instructions.`,
-    );
-  }
   if (!supportsOpenAIStreaming(model, baseUrl)) {
     throw new Error(
       `OpenAI stream mode is unsupported for model ${model}; use gpt-4o-mini-tts or disable stream.`,

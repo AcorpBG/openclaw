@@ -1018,37 +1018,6 @@ describe("tts", () => {
       expect(body.stream).toBeUndefined();
     });
 
-    it("keeps tts-1 working when global OpenAI instructions are configured", async () => {
-      const fetchMock = vi.fn().mockResolvedValue({
-        ok: true,
-        arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
-      });
-      globalThis.fetch = fetchMock as unknown as typeof fetch;
-
-      const cfg: OpenClawConfig = {
-        agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
-        messages: {
-          tts: {
-            provider: "openai",
-            openai: {
-              apiKey: "test-key",
-              model: "tts-1",
-              voice: "alloy",
-              instructions: "calm",
-            },
-          },
-        },
-      };
-
-      const result = await tts.textToSpeech({ text: "hello", cfg });
-
-      expect(result.success).toBe(true);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
-      expect(body.model).toBe("tts-1");
-      expect(body.instructions).toBeUndefined();
-    });
-
     it("uses configured OpenAI baseUrl when provided", async () => {
       const fetchMock = vi.fn().mockResolvedValue({
         ok: true,
@@ -1080,38 +1049,6 @@ describe("tts", () => {
       const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
       expect(body.instructions).toBeUndefined();
       expect(body.stream).toBe(true);
-    });
-
-    it("passes explicit instructions override for compatible models", async () => {
-      const fetchMock = vi.fn().mockResolvedValue({
-        ok: true,
-        arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
-      });
-      globalThis.fetch = fetchMock as unknown as typeof fetch;
-
-      const cfg: OpenClawConfig = {
-        agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
-        messages: {
-          tts: {
-            provider: "openai",
-            openai: {
-              apiKey: "test-key",
-              model: "gpt-4o-mini-tts",
-              voice: "alloy",
-            },
-          },
-        },
-      };
-
-      const result = await tts.textToSpeech({
-        text: "hello",
-        cfg,
-        overrides: { openai: { instructions: "speak warmly" } },
-      });
-
-      expect(result.success).toBe(true);
-      const body = getFetchRequestBody(fetchMock as unknown as { mock: { calls: unknown[][] } }, 0);
-      expect(body.instructions).toBe("speak warmly");
     });
 
     it("omits global instructions automatically for tts-1", async () => {
