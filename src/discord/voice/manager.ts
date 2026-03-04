@@ -35,7 +35,12 @@ import {
 import { resolveAgentRoute } from "../../routing/resolve-route.js";
 import type { RuntimeEnv } from "../../runtime.js";
 import { parseTtsDirectives } from "../../tts/tts-core.js";
-import { resolveTtsConfig, textToSpeech, type ResolvedTtsConfig } from "../../tts/tts.js";
+import {
+  resolveTtsConfig,
+  textToSpeech,
+  textToSpeechWithFallback,
+  type ResolvedTtsConfig,
+} from "../../tts/tts.js";
 import { formatMention } from "../mentions.js";
 import { resolveDiscordOwnerAccess } from "../monitor/allow-list.js";
 import { formatDiscordUserTag } from "../monitor/format.js";
@@ -673,7 +678,9 @@ export class DiscordVoiceManager {
       cfg: this.params.cfg,
       override: this.params.discordConfig.voice?.tts,
     });
-    const directive = parseTtsDirectives(replyText, ttsConfig.modelOverrides);
+    const directive = parseTtsDirectives(replyText, ttsConfig.modelOverrides, {
+      openaiBaseUrl: ttsConfig.openai.baseUrl,
+    });
     const speakText = directive.overrides.ttsText ?? directive.cleanedText.trim();
     if (!speakText) {
       logVoiceVerbose(
@@ -682,19 +689,102 @@ export class DiscordVoiceManager {
       return;
     }
 
-    const ttsResult = await textToSpeech({
+    const streamConfigured = ttsConfig.openai.stream;
+    if (streamConfigured) {
+      const ttsResult = await textToSpeechWithFallback({
+        text: speakText,
+        cfg: ttsCfg,
+        channel: "discord",
+        overrides: directive.overrides,
+        stream: { enabled: true, fallbackToBuffered: true },
+      });
+      if (!ttsResult.success) {
+        logger.warn(`discord voice: TTS failed: ${ttsResult.error ?? "unknown error"}`);
+        return;
+      }
+
+      if (ttsResult.delivery === "stream") {
+        const audioStream = ttsResult.audioStream;
+        if (!audioStream) {
+          logger.warn("discord voice: TTS stream delivery missing audio stream");
+          return;
+        }
+        logVoiceVerbose(
+          `tts stream ok (${speakText.length} chars): guild ${entry.guildId} channel ${entry.channelId}`,
+        );
+        this.enqueuePlayback(entry, async () => {
+          logVoiceVerbose(
+            `playback start: guild ${entry.guildId} channel ${entry.channelId} stream (progressive=${String(ttsResult.progressive === true)})`,
+          );
+          const resource = createAudioResource(audioStream);
+          entry.player.play(resource);
+          await entersState(
+            entry.player,
+            AudioPlayerStatus.Playing,
+            PLAYBACK_READY_TIMEOUT_MS,
+          ).catch(() => undefined);
+          await entersState(entry.player, AudioPlayerStatus.Idle, SPEAKING_READY_TIMEOUT_MS).catch(
+            () => undefined,
+          );
+          logVoiceVerbose(`playback done: guild ${entry.guildId} channel ${entry.channelId}`);
+        });
+        return;
+      }
+
+      if (!ttsResult.audioPath) {
+        logger.warn("discord voice: TTS buffered delivery missing audio path");
+        return;
+      }
+      const audioPath = ttsResult.audioPath;
+      if (ttsResult.fallbackFromError) {
+        logger.warn(
+          `discord voice: streaming fallback to buffered audio: ${ttsResult.fallbackFromError}`,
+        );
+      }
+      logVoiceVerbose(
+        `tts buffered ok (${speakText.length} chars): guild ${entry.guildId} channel ${entry.channelId}`,
+      );
+
+      this.enqueuePlayback(entry, async () => {
+        logVoiceVerbose(
+          `playback start: guild ${entry.guildId} channel ${entry.channelId} file ${path.basename(audioPath)}`,
+        );
+        const resource = createAudioResource(audioPath);
+        entry.player.play(resource);
+        await entersState(entry.player, AudioPlayerStatus.Playing, PLAYBACK_READY_TIMEOUT_MS).catch(
+          () => undefined,
+        );
+        await entersState(entry.player, AudioPlayerStatus.Idle, SPEAKING_READY_TIMEOUT_MS).catch(
+          () => undefined,
+        );
+        logVoiceVerbose(`playback done: guild ${entry.guildId} channel ${entry.channelId}`);
+      });
+      return;
+    }
+
+    const bufferedResult = await textToSpeech({
       text: speakText,
       cfg: ttsCfg,
       channel: "discord",
-      overrides: directive.overrides,
+      overrides: {
+        ...directive.overrides,
+        openai: {
+          ...directive.overrides.openai,
+          stream: false,
+        },
+      },
     });
-    if (!ttsResult.success || !ttsResult.audioPath) {
-      logger.warn(`discord voice: TTS failed: ${ttsResult.error ?? "unknown error"}`);
+    if (!bufferedResult.success) {
+      logger.warn(`discord voice: TTS failed: ${bufferedResult.error ?? "unknown error"}`);
       return;
     }
-    const audioPath = ttsResult.audioPath;
+    if (!bufferedResult.audioPath) {
+      logger.warn("discord voice: TTS buffered delivery missing audio path");
+      return;
+    }
+    const audioPath = bufferedResult.audioPath;
     logVoiceVerbose(
-      `tts ok (${speakText.length} chars): guild ${entry.guildId} channel ${entry.channelId}`,
+      `tts buffered ok (${speakText.length} chars): guild ${entry.guildId} channel ${entry.channelId}`,
     );
 
     this.enqueuePlayback(entry, async () => {
