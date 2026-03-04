@@ -1,4 +1,5 @@
 import { rmSync } from "node:fs";
+import { Readable, Transform } from "node:stream";
 import { completeSimple, type TextContent } from "@mariozechner/pi-ai";
 import { EdgeTTS } from "node-edge-tts";
 import { getApiKeyForModel, requireApiKey } from "../agents/model-auth.js";
@@ -19,6 +20,7 @@ import type {
 
 const DEFAULT_ELEVENLABS_BASE_URL = "https://api.elevenlabs.io";
 const TEMP_FILE_CLEANUP_DELAY_MS = 5 * 60 * 1000; // 5 minutes
+const OPENAI_STREAM_FORMAT_SNIFF_BYTES = 64;
 
 export function isValidVoiceId(voiceId: string): boolean {
   return /^[a-zA-Z0-9]{10,40}$/.test(voiceId);
@@ -99,6 +101,7 @@ function parseNumberValue(value: string): number | undefined {
 export function parseTtsDirectives(
   text: string,
   policy: ResolvedTtsModelOverrides,
+  options?: { openaiBaseUrl?: string },
 ): TtsDirectiveParseResult {
   if (!policy.enabled) {
     return { cleanedText: text, overrides: {}, warnings: [], hasDirective: false };
@@ -122,13 +125,24 @@ export function parseTtsDirectives(
   cleanedText = cleanedText.replace(directiveRegex, (_match, body: string) => {
     hasDirective = true;
     const tokens = body.split(/\s+/).filter(Boolean);
-    for (const token of tokens) {
+    const providerHintMatch = body.match(/(?:^|\s)provider=(openai|elevenlabs|edge)(?=\s|$)/i);
+    const providerHint =
+      policy.allowProvider &&
+      (providerHintMatch?.[1]?.toLowerCase() === "openai" ||
+        providerHintMatch?.[1]?.toLowerCase() === "elevenlabs" ||
+        providerHintMatch?.[1]?.toLowerCase() === "edge")
+        ? (providerHintMatch[1].toLowerCase() as "openai" | "elevenlabs" | "edge")
+        : undefined;
+    const selectedProvider = providerHint ?? overrides.provider;
+
+    for (let i = 0; i < tokens.length; i += 1) {
+      const token = tokens[i];
       const eqIndex = token.indexOf("=");
       if (eqIndex === -1) {
         continue;
       }
       const rawKey = token.slice(0, eqIndex).trim();
-      const rawValue = token.slice(eqIndex + 1).trim();
+      let rawValue = token.slice(eqIndex + 1).trim();
       if (!rawKey || !rawValue) {
         continue;
       }
@@ -139,10 +153,17 @@ export function parseTtsDirectives(
             if (!policy.allowProvider) {
               break;
             }
-            if (rawValue === "openai" || rawValue === "elevenlabs" || rawValue === "edge") {
-              overrides.provider = rawValue;
-            } else {
-              warnings.push(`unsupported provider "${rawValue}"`);
+            {
+              const normalizedProvider = rawValue.toLowerCase();
+              if (
+                normalizedProvider === "openai" ||
+                normalizedProvider === "elevenlabs" ||
+                normalizedProvider === "edge"
+              ) {
+                overrides.provider = normalizedProvider;
+              } else {
+                warnings.push(`unsupported provider "${rawValue}"`);
+              }
             }
             break;
           case "voice":
@@ -151,7 +172,7 @@ export function parseTtsDirectives(
             if (!policy.allowVoice) {
               break;
             }
-            if (isValidOpenAIVoice(rawValue)) {
+            if (isValidOpenAIVoice(rawValue, options?.openaiBaseUrl)) {
               overrides.openai = { ...overrides.openai, voice: rawValue };
             } else {
               warnings.push(`invalid OpenAI voice "${rawValue}"`);
@@ -180,10 +201,102 @@ export function parseTtsDirectives(
             if (!policy.allowModelId) {
               break;
             }
-            if (isValidOpenAIModel(rawValue)) {
+            if (
+              key === "elevenlabs_model" ||
+              key === "elevenlabsmodel" ||
+              key === "modelid" ||
+              key === "model_id"
+            ) {
+              overrides.elevenlabs = { ...overrides.elevenlabs, modelId: rawValue };
+              break;
+            }
+            if (key === "openai_model" || key === "openaimodel") {
+              if (isValidOpenAIModel(rawValue, options?.openaiBaseUrl)) {
+                overrides.openai = { ...overrides.openai, model: rawValue };
+              } else {
+                warnings.push(`invalid OpenAI model "${rawValue}"`);
+              }
+              break;
+            }
+            if (selectedProvider === "elevenlabs") {
+              overrides.elevenlabs = { ...overrides.elevenlabs, modelId: rawValue };
+              break;
+            }
+            if (selectedProvider === "openai") {
+              if (isValidOpenAIModel(rawValue, options?.openaiBaseUrl)) {
+                overrides.openai = { ...overrides.openai, model: rawValue };
+              } else {
+                warnings.push(`invalid OpenAI model "${rawValue}"`);
+              }
+              break;
+            }
+            if (isValidOpenAIModel(rawValue, options?.openaiBaseUrl)) {
               overrides.openai = { ...overrides.openai, model: rawValue };
             } else {
               overrides.elevenlabs = { ...overrides.elevenlabs, modelId: rawValue };
+            }
+            break;
+          case "instructions":
+          case "instruction":
+          case "instruct":
+            if (!policy.allowInstructions) {
+              break;
+            }
+            while (i + 1 < tokens.length && !tokens[i + 1].includes("=")) {
+              i += 1;
+              rawValue += ` ${tokens[i]}`;
+            }
+            overrides.openai = { ...overrides.openai, instructions: rawValue };
+            break;
+          case "stream":
+            if (!policy.allowStream) {
+              break;
+            }
+            {
+              const value = parseBooleanValue(rawValue);
+              if (value == null) {
+                warnings.push("invalid stream value");
+                break;
+              }
+              overrides.openai = { ...overrides.openai, stream: value };
+            }
+            break;
+          case "responseformat":
+          case "response_format":
+          case "format":
+            if (!policy.allowResponseFormat) {
+              break;
+            }
+            if (isValidOpenAIResponseFormat(rawValue)) {
+              overrides.openai = { ...overrides.openai, responseFormat: rawValue };
+            } else {
+              warnings.push("invalid responseFormat value");
+            }
+            break;
+          case "streamformat":
+          case "stream_format":
+            if (!policy.allowStreamFormat) {
+              break;
+            }
+            if (isValidOpenAIStreamFormat(rawValue)) {
+              overrides.openai = { ...overrides.openai, streamFormat: rawValue };
+            } else {
+              warnings.push("invalid streamFormat value");
+            }
+            break;
+          case "openai_speed":
+          case "openaispeed":
+            if (!policy.allowSpeed) {
+              break;
+            }
+            {
+              const value = parseNumberValue(rawValue);
+              if (value == null) {
+                warnings.push("invalid OpenAI speed value");
+                break;
+              }
+              requireInRange(value, 0.25, 4, "OpenAI speed");
+              overrides.openai = { ...overrides.openai, speed: value };
             }
             break;
           case "stability":
@@ -326,6 +439,10 @@ export function parseTtsDirectives(
 }
 
 export const OPENAI_TTS_MODELS = ["gpt-4o-mini-tts", "tts-1", "tts-1-hd"] as const;
+export const OPENAI_TTS_RESPONSE_FORMATS = ["mp3", "opus", "aac", "flac", "wav", "pcm"] as const;
+export const OPENAI_TTS_STREAM_FORMATS = ["audio", "sse"] as const;
+const OPENAI_TTS_MODELS_WITH_STREAMING = new Set<string>(["gpt-4o-mini-tts"]);
+const DEFAULT_OPENAI_TTS_BASE_URL = "https://api.openai.com/v1";
 
 /**
  * Custom OpenAI-compatible TTS endpoint.
@@ -334,15 +451,16 @@ export const OPENAI_TTS_MODELS = ["gpt-4o-mini-tts", "tts-1", "tts-1-hd"] as con
  *
  * Note: Read at runtime (not module load) to support config.env loading.
  */
-function getOpenAITtsBaseUrl(): string {
-  return (process.env.OPENAI_TTS_BASE_URL?.trim() || "https://api.openai.com/v1").replace(
-    /\/+$/,
-    "",
-  );
+function getOpenAITtsBaseUrl(baseUrl?: string): string {
+  return (
+    baseUrl?.trim() ||
+    process.env.OPENAI_TTS_BASE_URL?.trim() ||
+    DEFAULT_OPENAI_TTS_BASE_URL
+  ).replace(/\/+$/, "");
 }
 
-function isCustomOpenAIEndpoint(): boolean {
-  return getOpenAITtsBaseUrl() !== "https://api.openai.com/v1";
+function isCustomOpenAIEndpoint(baseUrl?: string): boolean {
+  return getOpenAITtsBaseUrl(baseUrl) !== DEFAULT_OPENAI_TTS_BASE_URL;
 }
 export const OPENAI_TTS_VOICES = [
   "alloy",
@@ -362,21 +480,324 @@ export const OPENAI_TTS_VOICES = [
 ] as const;
 
 type OpenAiTtsVoice = (typeof OPENAI_TTS_VOICES)[number];
+type OpenAiTtsResponseFormat = (typeof OPENAI_TTS_RESPONSE_FORMATS)[number];
+type OpenAiTtsStreamFormat = (typeof OPENAI_TTS_STREAM_FORMATS)[number];
 
-export function isValidOpenAIModel(model: string): boolean {
+export function isValidOpenAIModel(model: string, baseUrl?: string): boolean {
   // Allow any model when using custom endpoint (e.g., Kokoro, LocalAI)
-  if (isCustomOpenAIEndpoint()) {
+  if (isCustomOpenAIEndpoint(baseUrl)) {
     return true;
   }
   return OPENAI_TTS_MODELS.includes(model as (typeof OPENAI_TTS_MODELS)[number]);
 }
 
-export function isValidOpenAIVoice(voice: string): voice is OpenAiTtsVoice {
+function supportsOpenAIStreaming(model: string, baseUrl?: string): boolean {
+  return isCustomOpenAIEndpoint(baseUrl) || OPENAI_TTS_MODELS_WITH_STREAMING.has(model);
+}
+
+function isUnsupportedInstructionsApiError(error: Error): boolean {
+  const normalized = error.message.toLowerCase();
+  const hasUnsupportedSignal =
+    normalized.includes("unsupported") ||
+    normalized.includes("not supported") ||
+    normalized.includes("unknown parameter") ||
+    normalized.includes("unrecognized request argument");
+  const referencesInstructionParameter =
+    /(?:parameter|argument|field|property|key)\s*[:=]?\s*['"`]?instructions?['"`]?/.test(
+      normalized,
+    ) ||
+    /['"`]instructions?['"`]/.test(normalized) ||
+    /(?:^|[\s:(])instructions(?:$|[\s,.)])/i.test(normalized) ||
+    normalized.includes("instructions are not supported") ||
+    normalized.includes("instruction is not supported");
+  const hasGenericExtraInputSignal =
+    normalized.includes("extra inputs are not permitted") ||
+    normalized.includes("additional properties are not allowed");
+
+  // Some OpenAI-compatible backends only emit schema-validation phrasing.
+  // Keep those as fallback signals, but only when the message clearly points at the
+  // `instructions` field (to avoid retrying on unrelated validation failures).
+  return referencesInstructionParameter && (hasUnsupportedSignal || hasGenericExtraInputSignal);
+}
+
+export function isValidOpenAIVoice(voice: string, baseUrl?: string): voice is OpenAiTtsVoice {
   // Allow any voice when using custom endpoint (e.g., Kokoro Chinese voices)
-  if (isCustomOpenAIEndpoint()) {
+  if (isCustomOpenAIEndpoint(baseUrl)) {
     return true;
   }
   return OPENAI_TTS_VOICES.includes(voice as OpenAiTtsVoice);
+}
+
+export function isValidOpenAIResponseFormat(
+  responseFormat: string,
+): responseFormat is OpenAiTtsResponseFormat {
+  return OPENAI_TTS_RESPONSE_FORMATS.includes(responseFormat as OpenAiTtsResponseFormat);
+}
+
+export function isValidOpenAIStreamFormat(
+  streamFormat: string,
+): streamFormat is OpenAiTtsStreamFormat {
+  return OPENAI_TTS_STREAM_FORMATS.includes(streamFormat as OpenAiTtsStreamFormat);
+}
+
+function normalizeOpenAiContentType(contentType: string | null): string {
+  return (contentType ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+}
+
+function inferOpenAiFormatFromContentType(
+  contentType: string | null,
+): OpenAiTtsResponseFormat | undefined {
+  const normalized = normalizeOpenAiContentType(contentType);
+  if (!normalized) {
+    return undefined;
+  }
+  if (normalized === "audio/mpeg" || normalized === "audio/mp3") {
+    return "mp3";
+  }
+  if (
+    normalized === "audio/opus" ||
+    normalized === "audio/ogg" ||
+    normalized === "application/ogg"
+  ) {
+    return "opus";
+  }
+  if (
+    normalized === "audio/aac" ||
+    normalized === "audio/mp4" ||
+    normalized === "audio/x-m4a" ||
+    normalized === "audio/m4a"
+  ) {
+    return "aac";
+  }
+  if (normalized === "audio/flac" || normalized === "audio/x-flac") {
+    return "flac";
+  }
+  if (
+    normalized === "audio/wav" ||
+    normalized === "audio/wave" ||
+    normalized === "audio/x-wav" ||
+    normalized === "audio/vnd.wave"
+  ) {
+    return "wav";
+  }
+  if (normalized === "audio/pcm" || normalized === "audio/l16") {
+    return "pcm";
+  }
+  return undefined;
+}
+
+function inferOpenAiFormatFromBytes(audio: Buffer): OpenAiTtsResponseFormat | undefined {
+  if (audio.length >= 4 && audio.subarray(0, 4).toString("ascii") === "fLaC") {
+    return "flac";
+  }
+  if (
+    audio.length >= 12 &&
+    audio.subarray(0, 4).toString("ascii") === "RIFF" &&
+    audio.subarray(8, 12).toString("ascii") === "WAVE"
+  ) {
+    return "wav";
+  }
+  if (audio.length >= 4 && audio.subarray(0, 4).toString("ascii") === "OggS") {
+    return "opus";
+  }
+  if (audio.length >= 3 && audio.subarray(0, 3).toString("ascii") === "ID3") {
+    return "mp3";
+  }
+  // MP3 frame headers can start with 0xFF syncword (e.g. 0xFF 0xFB).
+  // Distinguish MP3 from AAC ADTS by layer bits: MP3 layer bits are not 00, while AAC ADTS layer bits are 00.
+  if (audio.length >= 2 && audio[0] === 0xff && (audio[1] & 0xf0) === 0xf0) {
+    const adtsLayerBits = audio[1] & 0x06;
+    if (adtsLayerBits === 0x00) {
+      return "aac";
+    }
+    return "mp3";
+  }
+  return undefined;
+}
+
+function looksLikeClearlyTextualPayload(bytes: Buffer): boolean {
+  if (bytes.length === 0) {
+    return false;
+  }
+  const sample = bytes.subarray(0, Math.min(bytes.length, OPENAI_STREAM_FORMAT_SNIFF_BYTES));
+  const ascii = sample.toString("utf8").trimStart().toLowerCase();
+  if (
+    ascii.startsWith("{") ||
+    ascii.startsWith("[") ||
+    ascii.startsWith("<!doctype") ||
+    ascii.startsWith("<html") ||
+    ascii.startsWith("<?xml")
+  ) {
+    return true;
+  }
+  const printableCount = [...sample].reduce((count, byte) => {
+    if (byte === 0x09 || byte === 0x0a || byte === 0x0d) {
+      return count + 1;
+    }
+    return byte >= 0x20 && byte <= 0x7e ? count + 1 : count;
+  }, 0);
+  return printableCount / sample.length >= 0.95;
+}
+
+function looksLikeSsePayload(bytes: Buffer): boolean {
+  if (bytes.length === 0) {
+    return false;
+  }
+  const sample = bytes.subarray(0, Math.min(bytes.length, OPENAI_STREAM_FORMAT_SNIFF_BYTES));
+  const ascii = sample.toString("utf8").toLowerCase();
+  return ascii.includes("event:") || ascii.includes("data:");
+}
+
+function isClearlyNonAudioOpenAiPayloadType(contentType: string): boolean {
+  return (
+    contentType.length > 0 &&
+    !contentType.startsWith("audio/") &&
+    contentType !== "application/ogg" &&
+    contentType !== "application/octet-stream"
+  );
+}
+
+function validateOpenAiPayload(params: {
+  requested?: OpenAiTtsResponseFormat;
+  contentType: string | null;
+  payloadSample: Buffer;
+  outputFormat: OpenAiTtsResponseFormat;
+  final: boolean;
+  streamPayload: boolean;
+  defaultUnknownToPcm: boolean;
+}): { validated: boolean; outputFormat: OpenAiTtsResponseFormat } {
+  const normalizedContentType = normalizeOpenAiContentType(params.contentType);
+  const formatFromContentType = inferOpenAiFormatFromContentType(params.contentType);
+  const detected = inferOpenAiFormatFromBytes(params.payloadSample) ?? formatFromContentType;
+  const shouldAllowUnknownPcmCompatibility =
+    params.requested === "pcm" ||
+    formatFromContentType === "pcm" ||
+    (params.requested == null && formatFromContentType == null);
+
+  if (detected) {
+    if (params.requested != null && detected !== params.requested) {
+      throw new Error(
+        `OpenAI TTS returned ${detected} but ${params.requested} was requested. ` +
+          `Align messages.tts.openai.responseFormat with upstream output or fix the upstream endpoint.`,
+      );
+    }
+    return {
+      validated: true,
+      outputFormat: params.requested ?? detected,
+    };
+  }
+
+  if (normalizedContentType === "text/event-stream" || looksLikeSsePayload(params.payloadSample)) {
+    throw new Error(
+      `OpenAI TTS ${params.streamPayload ? "stream payload" : "payload"} appears to be SSE, but audio bytes are required. ` +
+        "Use streamFormat=audio or disable stream mode for this endpoint.",
+    );
+  }
+
+  if (isClearlyNonAudioOpenAiPayloadType(normalizedContentType)) {
+    throw new Error(
+      `OpenAI TTS ${params.streamPayload ? "stream " : ""}returned non-audio payload type "${normalizedContentType}". ` +
+        "Use an endpoint that returns audio bytes (or disable stream mode).",
+    );
+  }
+
+  if (params.payloadSample.length > 0 && looksLikeClearlyTextualPayload(params.payloadSample)) {
+    throw new Error(
+      `OpenAI TTS ${params.streamPayload ? "stream " : ""}payload appears to be text/non-audio data. ` +
+        `Use an endpoint that returns raw audio bytes${params.streamPayload ? " for stream playback" : ""}.`,
+    );
+  }
+
+  const hasEnoughBytes = params.payloadSample.length >= OPENAI_STREAM_FORMAT_SNIFF_BYTES;
+  if (!params.final && !hasEnoughBytes) {
+    return { validated: false, outputFormat: params.outputFormat };
+  }
+
+  if (params.payloadSample.length === 0) {
+    throw new Error("OpenAI TTS API returned empty audio payload");
+  }
+
+  if (params.requested != null && params.requested !== "pcm") {
+    if (formatFromContentType !== params.requested) {
+      throw new Error(
+        `OpenAI TTS ${params.streamPayload ? "stream " : ""}payload could not be validated as ${params.requested}. ` +
+          "The endpoint may be returning a different format or non-audio data.",
+      );
+    }
+    return {
+      validated: true,
+      outputFormat: params.requested,
+    };
+  }
+
+  if (!shouldAllowUnknownPcmCompatibility) {
+    throw new Error(
+      `OpenAI TTS ${params.streamPayload ? "stream " : ""}payload could not be identified as audio. ` +
+        "Set responseFormat explicitly or use a backend that returns a detectable audio header.",
+    );
+  }
+
+  if (params.requested == null && formatFromContentType == null) {
+    return {
+      validated: true,
+      outputFormat: params.defaultUnknownToPcm ? "pcm" : params.outputFormat,
+    };
+  }
+
+  return {
+    validated: true,
+    outputFormat: params.requested ?? formatFromContentType ?? params.outputFormat,
+  };
+}
+
+function formatUnknownError(value: unknown): string {
+  if (value instanceof Error) {
+    return value.message;
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean" || value == null) {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return Object.prototype.toString.call(value);
+  }
+}
+
+async function buildOpenAiTtsApiError(response: Response): Promise<Error> {
+  let details = "";
+  try {
+    if (typeof response.text === "function") {
+      const raw = await response.text();
+      const trimmed = raw.trim();
+      if (trimmed) {
+        try {
+          const parsed = JSON.parse(trimmed) as {
+            error?: { message?: string } | string;
+            message?: string;
+          };
+          if (typeof parsed.error === "string") {
+            details = parsed.error;
+          } else if (typeof parsed.error?.message === "string") {
+            details = parsed.error.message;
+          } else if (typeof parsed.message === "string") {
+            details = parsed.message;
+          } else {
+            details = trimmed;
+          }
+        } catch {
+          details = trimmed;
+        }
+      }
+    }
+  } catch {
+    // ignore body parse failures and fall back to status-only error
+  }
+  const suffix = details ? `: ${details}` : "";
+  return new Error(`OpenAI TTS API error (${response.status})${suffix}`);
 }
 
 type SummarizeResult = {
@@ -593,44 +1014,474 @@ export async function openaiTTS(params: {
   apiKey: string;
   model: string;
   voice: string;
-  responseFormat: "mp3" | "opus" | "pcm";
+  responseFormat?: OpenAiTtsResponseFormat;
+  speed?: number;
+  instructions?: string;
+  instructionsExplicit?: boolean;
+  stream?: boolean;
+  streamFormat?: OpenAiTtsStreamFormat;
+  streamFallbackToBuffered?: boolean;
   timeoutMs: number;
-}): Promise<Buffer> {
-  const { text, apiKey, model, voice, responseFormat, timeoutMs } = params;
+  baseUrl?: string;
+}): Promise<{ audioBuffer: Buffer; outputFormat: OpenAiTtsResponseFormat }> {
+  const {
+    text,
+    apiKey,
+    model,
+    voice,
+    responseFormat,
+    speed,
+    instructions,
+    instructionsExplicit = false,
+    stream,
+    streamFormat,
+    streamFallbackToBuffered = true,
+    timeoutMs,
+    baseUrl,
+  } = params;
 
-  if (!isValidOpenAIModel(model)) {
+  if (!isValidOpenAIModel(model, baseUrl)) {
     throw new Error(`Invalid model: ${model}`);
   }
-  if (!isValidOpenAIVoice(voice)) {
+  if (!isValidOpenAIVoice(voice, baseUrl)) {
     throw new Error(`Invalid voice: ${voice}`);
+  }
+  if (speed != null && (!Number.isFinite(speed) || speed < 0.25 || speed > 4)) {
+    throw new Error("OpenAI speed must be between 0.25 and 4.0");
+  }
+  const normalizedInstructions = instructions?.trim();
+  if (stream === true && !supportsOpenAIStreaming(model, baseUrl)) {
+    throw new Error(
+      `OpenAI stream mode is unsupported for model ${model}; use gpt-4o-mini-tts or disable stream.`,
+    );
+  }
+  if (stream === true && streamFormat === "sse") {
+    throw new Error(
+      "OpenAI streamFormat=sse is not supported by OpenClaw audio playback yet; use streamFormat=audio.",
+    );
   }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(`${getOpenAITtsBaseUrl()}/audio/speech`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        input: text,
-        voice,
-        response_format: responseFormat,
-      }),
-      signal: controller.signal,
-    });
+    const makeRequest = async (
+      enableStream: boolean,
+      includeInstructions: boolean,
+      signal: AbortSignal = controller.signal,
+    ): Promise<Response> =>
+      fetch(`${getOpenAITtsBaseUrl(baseUrl)}/audio/speech`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          input: text,
+          voice,
+          ...(responseFormat != null ? { response_format: responseFormat } : {}),
+          ...(speed != null ? { speed } : {}),
+          ...(includeInstructions && normalizedInstructions
+            ? { instructions: normalizedInstructions }
+            : {}),
+          ...(enableStream ? { stream: true } : {}),
+          ...(enableStream && streamFormat ? { stream_format: streamFormat } : {}),
+        }),
+        signal,
+      });
 
-    if (!response.ok) {
-      throw new Error(`OpenAI TTS API error (${response.status})`);
+    const requestWithUnsupportedInstructionsRetry = async (
+      enableStream: boolean,
+      signal: AbortSignal = controller.signal,
+    ): Promise<Response> => {
+      let includeInstructions = Boolean(normalizedInstructions);
+      let retriedWithoutInstructions = false;
+
+      while (true) {
+        const response = await makeRequest(enableStream, includeInstructions, signal);
+        if (response.ok) {
+          return response;
+        }
+        const apiError = await buildOpenAiTtsApiError(response);
+        if (
+          includeInstructions &&
+          !instructionsExplicit &&
+          !retriedWithoutInstructions &&
+          isUnsupportedInstructionsApiError(apiError)
+        ) {
+          includeInstructions = false;
+          retriedWithoutInstructions = true;
+          continue;
+        }
+        throw apiError;
+      }
+    };
+
+    const toResult = async (res: Response) => {
+      const audioBuffer = Buffer.from(await res.arrayBuffer());
+      const validated = validateOpenAiPayload({
+        requested: responseFormat,
+        contentType: res.headers?.get?.("content-type") ?? null,
+        payloadSample: audioBuffer,
+        outputFormat: responseFormat ?? "mp3",
+        final: true,
+        streamPayload: false,
+        defaultUnknownToPcm: false,
+      });
+      return {
+        audioBuffer,
+        outputFormat: validated.outputFormat,
+      };
+    };
+
+    const attemptBufferedFallback = async (cause?: unknown) => {
+      const fallbackController = new AbortController();
+      const fallbackTimeout = setTimeout(() => fallbackController.abort(), timeoutMs);
+      try {
+        const fallback = await requestWithUnsupportedInstructionsRetry(
+          false,
+          fallbackController.signal,
+        );
+        return toResult(fallback);
+      } catch (fallbackError) {
+        if (cause != null) {
+          const streamError =
+            cause instanceof Error
+              ? cause
+              : new Error(`OpenAI TTS stream error: ${formatUnknownError(cause)}`);
+          const bufferedError =
+            fallbackError instanceof Error
+              ? fallbackError
+              : new Error(`OpenAI TTS fallback error: ${formatUnknownError(fallbackError)}`);
+          return Promise.reject(
+            new AggregateError(
+              [streamError, bufferedError],
+              `OpenAI TTS stream request failed and buffered fallback also failed: ${bufferedError.message}`,
+              { cause: fallbackError },
+            ),
+          );
+        }
+        throw fallbackError;
+      } finally {
+        clearTimeout(fallbackTimeout);
+      }
+    };
+
+    const shouldRequestStream = stream === true;
+    if (shouldRequestStream) {
+      try {
+        const streamResponse = await requestWithUnsupportedInstructionsRetry(true);
+        return await toResult(streamResponse);
+      } catch (err) {
+        if (streamFallbackToBuffered) {
+          return attemptBufferedFallback(err);
+        }
+        throw err;
+      }
     }
 
-    return Buffer.from(await response.arrayBuffer());
+    const response = await requestWithUnsupportedInstructionsRetry(false);
+    return toResult(response);
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+export async function openaiTTSReadable(params: {
+  text: string;
+  apiKey: string;
+  model: string;
+  voice: string;
+  responseFormat?: OpenAiTtsResponseFormat;
+  speed?: number;
+  instructions?: string;
+  instructionsExplicit?: boolean;
+  streamFormat?: OpenAiTtsStreamFormat;
+  timeoutMs: number;
+  baseUrl?: string;
+}): Promise<{ stream: Readable; progressive: boolean; outputFormat: OpenAiTtsResponseFormat }> {
+  const {
+    text,
+    apiKey,
+    model,
+    voice,
+    responseFormat,
+    speed,
+    instructions,
+    instructionsExplicit = false,
+    streamFormat,
+    timeoutMs,
+    baseUrl,
+  } = params;
+  if (!isValidOpenAIModel(model, baseUrl)) {
+    throw new Error(`Invalid model: ${model}`);
+  }
+  if (!isValidOpenAIVoice(voice, baseUrl)) {
+    throw new Error(`Invalid voice: ${voice}`);
+  }
+  if (speed != null && (!Number.isFinite(speed) || speed < 0.25 || speed > 4)) {
+    throw new Error("OpenAI speed must be between 0.25 and 4.0");
+  }
+  const normalizedInstructions = instructions?.trim();
+  if (!supportsOpenAIStreaming(model, baseUrl)) {
+    throw new Error(
+      `OpenAI stream mode is unsupported for model ${model}; use gpt-4o-mini-tts or disable stream.`,
+    );
+  }
+  if (streamFormat === "sse") {
+    throw new Error(
+      "OpenAI streamFormat=sse is not supported by OpenClaw audio playback yet; use streamFormat=audio.",
+    );
+  }
+
+  const controller = new AbortController();
+  let firstChunkReceived = false;
+  let firstByteTimedOut = false;
+  let handleFirstByteTimeout: (() => void) | null = null;
+  let firstByteTimer: NodeJS.Timeout | null = setTimeout(() => {
+    firstByteTimedOut = true;
+    if (handleFirstByteTimeout) {
+      handleFirstByteTimeout();
+      return;
+    }
+    controller.abort();
+  }, timeoutMs);
+  let idleTimer: NodeJS.Timeout | null = null;
+
+  const clearFirstByteTimer = () => {
+    if (!firstByteTimer) {
+      return;
+    }
+    clearTimeout(firstByteTimer);
+    firstByteTimer = null;
+  };
+
+  const clearIdleTimer = () => {
+    if (!idleTimer) {
+      return;
+    }
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  };
+
+  const clearAbortTimers = () => {
+    clearFirstByteTimer();
+    clearIdleTimer();
+  };
+
+  let handleIdleTimeout: (() => void) | null = null;
+  const refreshIdleTimer = () => {
+    if (!firstChunkReceived) {
+      return;
+    }
+    clearIdleTimer();
+    idleTimer = setTimeout(() => {
+      if (handleIdleTimeout) {
+        handleIdleTimeout();
+        return;
+      }
+      controller.abort();
+    }, timeoutMs);
+  };
+
+  try {
+    let includeInstructions = Boolean(normalizedInstructions);
+    let retriedWithoutInstructions = false;
+    let response: Response;
+    while (true) {
+      response = await fetch(`${getOpenAITtsBaseUrl(baseUrl)}/audio/speech`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model,
+          input: text,
+          voice,
+          ...(responseFormat != null ? { response_format: responseFormat } : {}),
+          ...(speed != null ? { speed } : {}),
+          ...(includeInstructions && normalizedInstructions
+            ? { instructions: normalizedInstructions }
+            : {}),
+          stream: true,
+          ...(streamFormat ? { stream_format: streamFormat } : {}),
+        }),
+        signal: controller.signal,
+      });
+
+      if (response.ok) {
+        break;
+      }
+
+      const apiError = await buildOpenAiTtsApiError(response);
+      if (
+        includeInstructions &&
+        !instructionsExplicit &&
+        !retriedWithoutInstructions &&
+        isUnsupportedInstructionsApiError(apiError)
+      ) {
+        includeInstructions = false;
+        retriedWithoutInstructions = true;
+        continue;
+      }
+
+      throw apiError;
+    }
+
+    if (!response.body) {
+      throw new Error("OpenAI TTS API returned no response body");
+    }
+
+    let outputFormat = responseFormat ?? "mp3";
+    const responseContentType = response.headers?.get?.("content-type") ?? null;
+    validateOpenAiPayload({
+      requested: responseFormat,
+      contentType: responseContentType,
+      payloadSample: Buffer.alloc(0),
+      outputFormat,
+      final: false,
+      streamPayload: true,
+      defaultUnknownToPcm: true,
+    });
+
+    const webBody = response.body as import("node:stream/web").ReadableStream;
+    const source = Readable.fromWeb(webBody);
+    let sniffed = Buffer.alloc(0);
+    let validated = false;
+    let upstreamTornDown = false;
+    let endedNaturally = false;
+    let streamErrored = false;
+    let streamResultRef:
+      | { stream: Readable; progressive: boolean; outputFormat: OpenAiTtsResponseFormat }
+      | undefined;
+    const tearDownUpstream = (reason?: Error) => {
+      if (upstreamTornDown) {
+        return;
+      }
+      upstreamTornDown = true;
+      void webBody.cancel(reason).catch(() => {});
+      source.destroy(reason);
+    };
+    handleFirstByteTimeout = () => {
+      const firstByteError = new Error(
+        `OpenAI TTS stream timed out waiting for first byte after ${timeoutMs}ms`,
+      );
+      tearDownUpstream(firstByteError);
+      controller.abort();
+    };
+    handleIdleTimeout = () => {
+      const idleError = new Error(
+        `OpenAI TTS stream stalled: no audio chunk received for ${timeoutMs}ms`,
+      );
+      tearDownUpstream(idleError);
+      controller.abort();
+    };
+    const transform = new Transform({
+      transform(chunk, _encoding, callback) {
+        const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+        if (data.length > 0) {
+          if (!firstChunkReceived) {
+            firstChunkReceived = true;
+            clearFirstByteTimer();
+          }
+          refreshIdleTimer();
+        }
+        if (!validated && data.length > 0) {
+          if (sniffed.length < OPENAI_STREAM_FORMAT_SNIFF_BYTES) {
+            const needed = OPENAI_STREAM_FORMAT_SNIFF_BYTES - sniffed.length;
+            const nextSlice = data.subarray(0, needed);
+            sniffed = Buffer.concat([sniffed, nextSlice], sniffed.length + nextSlice.length);
+          }
+          try {
+            const next = validateOpenAiPayload({
+              requested: responseFormat,
+              contentType: responseContentType,
+              payloadSample: sniffed,
+              outputFormat,
+              final: false,
+              streamPayload: true,
+              defaultUnknownToPcm: true,
+            });
+            outputFormat = next.outputFormat;
+            if (streamResultRef) {
+              streamResultRef.outputFormat = next.outputFormat;
+            }
+            validated = next.validated;
+          } catch (error) {
+            const validationError =
+              error instanceof Error ? error : new Error(formatUnknownError(error));
+            tearDownUpstream(validationError);
+            callback(validationError);
+            return;
+          }
+        }
+        callback(null, data);
+      },
+      final(callback) {
+        if (validated) {
+          callback();
+          return;
+        }
+        try {
+          const next = validateOpenAiPayload({
+            requested: responseFormat,
+            contentType: responseContentType,
+            payloadSample: sniffed,
+            outputFormat,
+            final: true,
+            streamPayload: true,
+            defaultUnknownToPcm: true,
+          });
+          outputFormat = next.outputFormat;
+          if (streamResultRef) {
+            streamResultRef.outputFormat = next.outputFormat;
+          }
+          validated = true;
+          callback();
+        } catch (error) {
+          const validationError =
+            error instanceof Error ? error : new Error(formatUnknownError(error));
+          tearDownUpstream(validationError);
+          callback(validationError);
+        }
+      },
+    });
+    source.on("error", (error) => {
+      transform.destroy(error);
+    });
+    const stream = source.pipe(transform);
+    stream.once("end", () => {
+      endedNaturally = true;
+      clearAbortTimers();
+    });
+    stream.once("error", () => {
+      streamErrored = true;
+      clearAbortTimers();
+    });
+    stream.once("close", () => {
+      clearAbortTimers();
+      if (!endedNaturally && !streamErrored) {
+        tearDownUpstream(new Error("OpenAI TTS stream closed before completion"));
+      }
+    });
+
+    const streamResult = {
+      stream,
+      progressive: true,
+      outputFormat,
+    };
+    streamResultRef = streamResult;
+    return streamResult;
+  } catch (err) {
+    clearAbortTimers();
+    if (firstByteTimedOut) {
+      throw new Error(`OpenAI TTS stream timed out waiting for first byte after ${timeoutMs}ms`, {
+        cause: err,
+      });
+    }
+    throw err;
   }
 }
 
