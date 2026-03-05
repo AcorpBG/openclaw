@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const loadConfigMock = vi.fn();
-const resolveTtsConfigMock = vi.fn(() => ({ openai: { stream: false } }));
+const resolveTtsConfigMock = vi.fn((_cfg?: unknown) => ({ openai: { stream: false } }));
 vi.mock("../../config/config.js", () => ({
   loadConfig: () => loadConfigMock(),
 }));
@@ -17,7 +17,7 @@ vi.mock("../../tts/tts.js", () => ({
   isTtsProviderConfigured: () => true,
   resolveTtsAutoMode: () => "always",
   resolveTtsApiKey: () => "k",
-  resolveTtsConfig: (...args: unknown[]) => resolveTtsConfigMock(...args),
+  resolveTtsConfig: (cfg: unknown) => resolveTtsConfigMock(cfg),
   resolveTtsPrefsPath: () => "/tmp/tts.json",
   resolveTtsProviderOrder: () => ["openai", "edge"],
   setTtsEnabled: vi.fn(),
