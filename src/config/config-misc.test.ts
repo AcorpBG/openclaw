@@ -323,6 +323,20 @@ describe("messages.tts OpenAI fields", () => {
     expect(speed.ok).toBe(false);
     expect(streamFormat.ok).toBe(false);
   });
+
+  it("rejects stream=true with streamFormat=sse", () => {
+    const res = validateConfigObject({
+      messages: {
+        tts: {
+          openai: {
+            stream: true,
+            streamFormat: "sse",
+          },
+        },
+      },
+    });
+    expect(res.ok).toBe(false);
+  });
 });
 
 describe("model compat config schema", () => {

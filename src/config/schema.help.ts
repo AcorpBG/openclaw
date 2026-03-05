@@ -1276,7 +1276,7 @@ export const FIELD_HELP: Record<string, string> = {
   "messages.tts.openai.speed":
     "OpenAI /audio/speech speed multiplier (0.25 to 4.0). Keep near 1.0 for natural delivery and adjust cautiously for intelligibility.",
   "messages.tts.openai.streamFormat":
-    'OpenAI stream payload format when stream mode is enabled: "audio" or "sse". OpenClaw playback paths require raw audio bytes and currently reject SSE payloads.',
+    'OpenAI stream payload format when stream mode is enabled: "audio" or "sse". OpenClaw playback paths require raw audio bytes; when stream=true, set streamFormat=audio (streamFormat=sse is rejected).',
   "messages.tts.modelOverrides.allowInstructions":
     "Allow model-emitted [[tts:instructions=...]] overrides for one reply when directive overrides are enabled (default: false).",
   "messages.tts.modelOverrides.allowStream":
@@ -1284,7 +1284,7 @@ export const FIELD_HELP: Record<string, string> = {
   "messages.tts.modelOverrides.allowResponseFormat":
     "Allow model-emitted [[tts:responseFormat=...]] overrides for one reply when directive overrides are enabled (default: false).",
   "messages.tts.modelOverrides.allowSpeed":
-    "Allow model-emitted [[tts:speed=...]] overrides for one reply when directive overrides are enabled.",
+    "Allow model-emitted [[tts:openai_speed=...]] overrides for one reply when directive overrides are enabled (default: true).",
   "messages.tts.modelOverrides.allowStreamFormat":
     "Allow model-emitted [[tts:streamFormat=audio|sse]] overrides for one reply when directive overrides are enabled (default: false).",
   channels:

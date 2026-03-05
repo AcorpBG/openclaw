@@ -219,6 +219,7 @@ Then run:
 - `modelOverrides`: allow the model to emit TTS directives (on by default).
   - `allowProvider` defaults to `false` (provider switching is opt-in).
   - `allowInstructions`, `allowStream`, `allowResponseFormat`, and `allowStreamFormat` default to `false` (opt-in for transport/format changes).
+  - `allowSpeed` defaults to `true` (model-emitted `[[tts:openai_speed=...]]` stays enabled unless you disable it).
 - `maxTextLength`: hard cap for TTS input (chars). `/tts audio` fails if exceeded.
 - `timeoutMs`: request timeout (ms).
 - `prefsPath`: override the local prefs JSON path (provider/limit/summary).
@@ -238,7 +239,7 @@ Then run:
 - `openai.speed`: OpenAI speech speed multiplier (`0.25..4.0`, default `1.0`).
 - `openai.streamFormat`: OpenAI stream payload mode (`audio|sse`).
   - OpenClaw playback supports `audio`.
-  - `sse` is exposed for compatibility but currently rejected by playback/runtime paths with a clear error (these paths require raw audio bytes, not SSE frames).
+  - When `openai.stream=true`, `streamFormat=sse` is rejected with a clear validation/runtime error (playback paths require raw audio bytes, not SSE frames).
 - `elevenlabs.baseUrl`: override ElevenLabs API base URL.
 - `elevenlabs.voiceSettings`:
   - `stability`, `similarityBoost`, `style`: `0..1`
@@ -440,7 +441,13 @@ Gateway methods:
 
 - `instructions` (string): one-off OpenAI speech instructions.
 - `stream` (boolean): one-off OpenAI stream request (still returns buffered file output; failed stream attempts automatically retry buffered).
+- `responseFormat` (`mp3|opus|aac|flac|wav|pcm`): one-off OpenAI output format override.
+- `speed` (`0.25..4.0`): one-off OpenAI speed override.
+- `streamFormat` (`audio|sse`): one-off OpenAI stream payload override.
 - Safety checks:
   - blank `text` is rejected
   - blank `channel` / `instructions` are treated as unset
   - invalid `stream` types are ignored (must be boolean)
+  - invalid `responseFormat` / `streamFormat` values are rejected
+  - `speed` must use valid decimal syntax (for example `1`, `1.25`, `.9`) and stay within `0.25..4.0`
+  - `streamFormat=sse` is rejected when effective stream mode is enabled (`stream=true` at request time or by config)

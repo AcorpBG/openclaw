@@ -21,6 +21,17 @@ import { ErrorCodes, errorShape } from "../protocol/index.js";
 import { formatForLog } from "../ws-log.js";
 import type { GatewayRequestHandlers } from "./types.js";
 
+const STRICT_DECIMAL_NUMBER_PATTERN = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
+
+function parseStrictDecimalString(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed || !STRICT_DECIMAL_NUMBER_PATTERN.test(trimmed)) {
+    return undefined;
+  }
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 export const ttsHandlers: GatewayRequestHandlers = {
   "tts.status": async ({ respond }) => {
     try {
@@ -134,13 +145,29 @@ export const ttsHandlers: GatewayRequestHandlers = {
       const streamFormat = streamFormatRaw as
         | (typeof OPENAI_TTS_STREAM_FORMATS)[number]
         | undefined;
+      const effectiveStream = stream ?? resolveTtsConfig(cfg).openai.stream;
+      if (streamFormat === "sse" && effectiveStream) {
+        respond(
+          false,
+          undefined,
+          errorShape(
+            ErrorCodes.INVALID_REQUEST,
+            "streamFormat=sse is not supported for OpenAI streamed playback; use streamFormat=audio or stream=false.",
+          ),
+        );
+        return;
+      }
       const speedRaw =
         typeof params.speed === "number"
           ? params.speed
           : typeof params.speed === "string"
-            ? Number.parseFloat(params.speed)
+            ? parseStrictDecimalString(params.speed)
             : undefined;
-      if (speedRaw != null && (!Number.isFinite(speedRaw) || speedRaw < 0.25 || speedRaw > 4)) {
+      const malformedSpeedString = typeof params.speed === "string" && speedRaw == null;
+      if (
+        malformedSpeedString ||
+        (speedRaw != null && (!Number.isFinite(speedRaw) || speedRaw < 0.25 || speedRaw > 4))
+      ) {
         respond(
           false,
           undefined,

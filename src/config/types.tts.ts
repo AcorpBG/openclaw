@@ -31,7 +31,7 @@ export type TtsModelOverrideConfig = {
   allowStream?: boolean;
   /** Allow model-provided OpenAI response format override (default: false). */
   allowResponseFormat?: boolean;
-  /** Allow model-provided OpenAI speed override. */
+  /** Allow model-provided OpenAI speed override (default: true). */
   allowSpeed?: boolean;
   /** Allow model-provided OpenAI stream format override (default: false). */
   allowStreamFormat?: boolean;

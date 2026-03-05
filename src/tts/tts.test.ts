@@ -377,6 +377,18 @@ describe("tts", () => {
       expect(result.overrides.openai?.streamFormat).toBe("audio");
     });
 
+    it("rejects malformed OpenAI speed directive values", () => {
+      const policy = resolveModelOverridePolicy({
+        enabled: true,
+        allowSpeed: true,
+      });
+      const input = "Hello [[tts:openai_speed=1.75abc]] world";
+      const result = parseTtsDirectives(input, policy, {});
+
+      expect(result.overrides.openai?.speed).toBeUndefined();
+      expect(result.warnings).toContain("invalid OpenAI speed value");
+    });
+
     it("routes openai_model directives using configured custom openai baseUrl", () => {
       const policy = resolveModelOverridePolicy({ enabled: true });
       const input = "Hello [[tts:openai_model=qwen3-tts]] world";
