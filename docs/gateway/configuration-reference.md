@@ -1620,13 +1620,14 @@ Batches rapid text-only messages from the same sender into a single agent turn. 
 - `summaryModel` overrides `agents.defaults.model.primary` for auto-summary.
 - `modelOverrides` is enabled by default; `modelOverrides.allowProvider` defaults to `false` (opt-in).
 - `modelOverrides.allowInstructions`, `allowStream`, `allowResponseFormat`, and `allowStreamFormat` default to `false` (opt-in transport/format overrides).
+- `modelOverrides.allowSpeed` defaults to `true` (model-emitted `[[tts:openai_speed=...]]` remains enabled unless explicitly disabled).
 - `openai.baseUrl` sets an optional OpenAI-compatible API base URL (default: `https://api.openai.com/v1`).
 - `openai.instructions` passes optional style instructions to OpenAI `/audio/speech` (supported by `gpt-4o-mini-tts` on the default OpenAI endpoint).
 - `openai.stream` requests OpenAI stream mode; buffered workflows remain the default unless stream handling is explicitly enabled.
 - `openai.responseFormat` sets OpenAI output format (`mp3|opus|aac|flac|wav|pcm`). For message playback, use compressed/container formats; `pcm` is intended for telephony-oriented outputs.
 - For streamed payloads from OpenAI-compatible backends with unknown/undetectable audio headers, OpenClaw only treats raw binary as PCM when PCM is explicitly or implicitly indicated (requested `responseFormat=pcm`, PCM content-type, or no format metadata). It still rejects SSE, clearly textual payloads, and clearly non-audio content-types.
 - `openai.speed` sets OpenAI speech speed (`0.25..4.0`, default `1.0`).
-- `openai.streamFormat` sets stream payload mode (`audio|sse`) when stream mode is enabled. OpenClaw playback currently supports `audio` and rejects `sse` with an actionable error because playback expects raw audio bytes.
+- `openai.streamFormat` sets stream payload mode (`audio|sse`) when stream mode is enabled. OpenClaw playback currently supports `audio`; `stream=true` with `streamFormat=sse` is rejected because playback expects raw audio bytes.
 - OpenAI model/voice/feature validation stays strict on `https://api.openai.com/v1` and relaxes model/voice checks when `openai.baseUrl` points to a custom OpenAI-compatible endpoint.
 - API keys fall back to `ELEVENLABS_API_KEY`/`XI_API_KEY` and `OPENAI_API_KEY`.
 

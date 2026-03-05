@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const loadConfigMock = vi.fn();
+const resolveTtsConfigMock = vi.fn(() => ({ openai: { stream: false } }));
 vi.mock("../../config/config.js", () => ({
   loadConfig: () => loadConfigMock(),
 }));
@@ -16,7 +17,7 @@ vi.mock("../../tts/tts.js", () => ({
   isTtsProviderConfigured: () => true,
   resolveTtsAutoMode: () => "always",
   resolveTtsApiKey: () => "k",
-  resolveTtsConfig: () => ({}),
+  resolveTtsConfig: (...args: unknown[]) => resolveTtsConfigMock(...args),
   resolveTtsPrefsPath: () => "/tmp/tts.json",
   resolveTtsProviderOrder: () => ["openai", "edge"],
   setTtsEnabled: vi.fn(),
@@ -27,6 +28,13 @@ vi.mock("../../tts/tts.js", () => ({
 const { ttsHandlers } = await import("./tts.js");
 
 describe("tts server methods", () => {
+  beforeEach(() => {
+    loadConfigMock.mockReset();
+    resolveTtsConfigMock.mockReset();
+    resolveTtsConfigMock.mockReturnValue({ openai: { stream: false } });
+    textToSpeechMock.mockReset();
+  });
+
   it("passes OpenAI runtime overrides to textToSpeech", async () => {
     loadConfigMock.mockReturnValue({});
     textToSpeechMock.mockResolvedValueOnce({
@@ -95,6 +103,79 @@ describe("tts server methods", () => {
       false,
       undefined,
       expect.objectContaining({ code: "INVALID_REQUEST" }),
+    );
+  });
+
+  it("rejects malformed OpenAI runtime speed strings", async () => {
+    loadConfigMock.mockReturnValue({});
+    const respond = vi.fn();
+
+    await ttsHandlers["tts.convert"]({
+      req: { type: "req", id: "1", method: "tts.convert", params: {} },
+      params: { text: "hello", speed: "1.2abc" },
+      client: null,
+      isWebchatConnect: () => false,
+      respond,
+      context: {} as never,
+    });
+
+    expect(textToSpeechMock).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({
+        code: "INVALID_REQUEST",
+        message: "Invalid speed. Use a number between 0.25 and 4.0.",
+      }),
+    );
+  });
+
+  it("rejects streamFormat=sse when stream is explicitly enabled", async () => {
+    loadConfigMock.mockReturnValue({});
+    const respond = vi.fn();
+
+    await ttsHandlers["tts.convert"]({
+      req: { type: "req", id: "1", method: "tts.convert", params: {} },
+      params: { text: "hello", stream: true, streamFormat: "sse" },
+      client: null,
+      isWebchatConnect: () => false,
+      respond,
+      context: {} as never,
+    });
+
+    expect(textToSpeechMock).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({
+        code: "INVALID_REQUEST",
+        message: expect.stringContaining("streamFormat=sse"),
+      }),
+    );
+  });
+
+  it("rejects streamFormat=sse when stream is enabled in config", async () => {
+    loadConfigMock.mockReturnValue({});
+    resolveTtsConfigMock.mockReturnValueOnce({ openai: { stream: true } });
+    const respond = vi.fn();
+
+    await ttsHandlers["tts.convert"]({
+      req: { type: "req", id: "1", method: "tts.convert", params: {} },
+      params: { text: "hello", streamFormat: "sse" },
+      client: null,
+      isWebchatConnect: () => false,
+      respond,
+      context: {} as never,
+    });
+
+    expect(textToSpeechMock).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({
+        code: "INVALID_REQUEST",
+        message: expect.stringContaining("streamFormat=sse"),
+      }),
     );
   });
 });

@@ -21,6 +21,7 @@ import type {
 const DEFAULT_ELEVENLABS_BASE_URL = "https://api.elevenlabs.io";
 const TEMP_FILE_CLEANUP_DELAY_MS = 5 * 60 * 1000; // 5 minutes
 const OPENAI_STREAM_FORMAT_SNIFF_BYTES = 64;
+const STRICT_DECIMAL_NUMBER_PATTERN = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
 
 export function isValidVoiceId(voiceId: string): boolean {
   return /^[a-zA-Z0-9]{10,40}$/.test(voiceId);
@@ -95,6 +96,15 @@ function parseBooleanValue(value: string): boolean | undefined {
 
 function parseNumberValue(value: string): number | undefined {
   const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseStrictNumberValue(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed || !STRICT_DECIMAL_NUMBER_PATTERN.test(trimmed)) {
+    return undefined;
+  }
+  const parsed = Number(trimmed);
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
@@ -290,7 +300,7 @@ export function parseTtsDirectives(
               break;
             }
             {
-              const value = parseNumberValue(rawValue);
+              const value = parseStrictNumberValue(rawValue);
               if (value == null) {
                 warnings.push("invalid OpenAI speed value");
                 break;

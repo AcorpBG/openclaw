@@ -416,6 +416,16 @@ export const TtsConfigSchema = z
         streamFormat: z.enum(["audio", "sse"]).optional(),
       })
       .strict()
+      .superRefine((value, ctx) => {
+        if (value.stream === true && value.streamFormat === "sse") {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["streamFormat"],
+            message:
+              'messages.tts.openai.streamFormat cannot be "sse" when messages.tts.openai.stream is true; use "audio" or disable stream.',
+          });
+        }
+      })
       .optional(),
     edge: z
       .object({
