@@ -101,7 +101,7 @@ function parseNumberValue(value: string): number | undefined {
 export function parseTtsDirectives(
   text: string,
   policy: ResolvedTtsModelOverrides,
-  options?: { openaiBaseUrl?: string },
+  openaiBaseUrl?: string,
 ): TtsDirectiveParseResult {
   if (!policy.enabled) {
     return { cleanedText: text, overrides: {}, warnings: [], hasDirective: false };
@@ -172,7 +172,7 @@ export function parseTtsDirectives(
             if (!policy.allowVoice) {
               break;
             }
-            if (isValidOpenAIVoice(rawValue, options?.openaiBaseUrl)) {
+            if (isValidOpenAIVoice(rawValue, openaiBaseUrl)) {
               overrides.openai = { ...overrides.openai, voice: rawValue };
             } else {
               warnings.push(`invalid OpenAI voice "${rawValue}"`);
@@ -211,7 +211,7 @@ export function parseTtsDirectives(
               break;
             }
             if (key === "openai_model" || key === "openaimodel") {
-              if (isValidOpenAIModel(rawValue, options?.openaiBaseUrl)) {
+              if (isValidOpenAIModel(rawValue, openaiBaseUrl)) {
                 overrides.openai = { ...overrides.openai, model: rawValue };
               } else {
                 warnings.push(`invalid OpenAI model "${rawValue}"`);
@@ -223,14 +223,14 @@ export function parseTtsDirectives(
               break;
             }
             if (selectedProvider === "openai") {
-              if (isValidOpenAIModel(rawValue, options?.openaiBaseUrl)) {
+              if (isValidOpenAIModel(rawValue, openaiBaseUrl)) {
                 overrides.openai = { ...overrides.openai, model: rawValue };
               } else {
                 warnings.push(`invalid OpenAI model "${rawValue}"`);
               }
               break;
             }
-            if (isValidOpenAIModel(rawValue, options?.openaiBaseUrl)) {
+            if (isValidOpenAIModel(rawValue, openaiBaseUrl)) {
               overrides.openai = { ...overrides.openai, model: rawValue };
             } else {
               overrides.elevenlabs = { ...overrides.elevenlabs, modelId: rawValue };
