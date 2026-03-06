@@ -128,7 +128,7 @@ export type ResolvedTtsConfig = {
   };
   openai: {
     apiKey?: string;
-    baseUrl?: string;
+    baseUrl: string;
     model: string;
     voice: string;
     instructions?: string;
@@ -381,7 +381,12 @@ export function resolveTtsConfig(cfg: OpenClawConfig): ResolvedTtsConfig {
         value: raw.openai?.apiKey,
         path: "messages.tts.openai.apiKey",
       }),
-      baseUrl: raw.openai?.baseUrl?.trim() || undefined,
+      // Config > env var > default; strip trailing slashes for consistency.
+      baseUrl: (
+        raw.openai?.baseUrl?.trim() ||
+        process.env.OPENAI_TTS_BASE_URL?.trim() ||
+        DEFAULT_OPENAI_TTS_BASE_URL
+      ).replace(/\/+$/, ""),
       model: raw.openai?.model ?? DEFAULT_OPENAI_MODEL,
       voice: raw.openai?.voice ?? DEFAULT_OPENAI_VOICE,
       instructions: raw.openai?.instructions?.trim() || undefined,
@@ -1388,9 +1393,7 @@ export async function maybeApplyTtsToPayload(params: {
   }
 
   const text = params.payload.text ?? "";
-  const directives = parseTtsDirectives(text, config.modelOverrides, {
-    openaiBaseUrl: config.openai.baseUrl,
-  });
+  const directives = parseTtsDirectives(text, config.modelOverrides, config.openai.baseUrl);
   if (directives.warnings.length > 0) {
     logVerbose(`TTS: ignored directive overrides (${directives.warnings.join("; ")})`);
   }
