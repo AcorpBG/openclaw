@@ -10,6 +10,7 @@ import {
   resolveAcpThreadSessionDetailLines,
 } from "../acp/runtime/session-identifiers.js";
 import type { AcpRuntimeSessionMode } from "../acp/runtime/types.js";
+import { normalizeThinkLevel } from "../auto-reply/thinking.js";
 import {
   resolveThreadBindingIntroText,
   resolveThreadBindingThreadName,
@@ -45,11 +46,14 @@ export const ACP_SPAWN_SANDBOX_MODES = ["inherit", "require"] as const;
 export type SpawnAcpSandboxMode = (typeof ACP_SPAWN_SANDBOX_MODES)[number];
 export const ACP_SPAWN_STREAM_TARGETS = ["parent"] as const;
 export type SpawnAcpStreamTarget = (typeof ACP_SPAWN_STREAM_TARGETS)[number];
+const ACP_SPAWN_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "adaptive"];
 
 export type SpawnAcpParams = {
   task: string;
   label?: string;
   agentId?: string;
+  model?: string;
+  thinking?: string;
   cwd?: string;
   mode?: SpawnAcpMode;
   thread?: boolean;
@@ -139,6 +143,53 @@ function summarizeError(err: unknown): string {
     return err;
   }
   return "error";
+}
+
+function normalizeAcpSpawnModelOverride(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function normalizeAcpSpawnThinkingOverride(
+  value: string | undefined,
+): { ok: true; value?: string } | { ok: false; error: string } {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return { ok: true };
+  }
+  const normalized = normalizeThinkLevel(trimmed);
+  if (!normalized) {
+    return {
+      ok: false,
+      error: `Invalid thinking level "${trimmed}". Use one of: ${ACP_SPAWN_THINKING_LEVELS.join(", ")}.`,
+    };
+  }
+  return { ok: true, value: normalized };
+}
+
+async function applySpawnRuntimeOverrides(params: {
+  cfg: OpenClawConfig;
+  sessionKey: string;
+  acpManager: ReturnType<typeof getAcpSessionManager>;
+  model?: string;
+  thinking?: string;
+}): Promise<void> {
+  if (params.model) {
+    await params.acpManager.setSessionConfigOption({
+      cfg: params.cfg,
+      sessionKey: params.sessionKey,
+      key: "model",
+      value: params.model,
+    });
+  }
+  if (params.thinking) {
+    await params.acpManager.setSessionConfigOption({
+      cfg: params.cfg,
+      sessionKey: params.sessionKey,
+      key: "thinking",
+      value: params.thinking,
+    });
+  }
 }
 
 function resolveConversationIdForThreadBinding(params: {
@@ -236,6 +287,15 @@ export async function spawnAcpDirect(
   ctx: SpawnAcpContext,
 ): Promise<SpawnAcpResult> {
   const cfg = loadConfig();
+  const modelOverride = normalizeAcpSpawnModelOverride(params.model);
+  const thinkingOverrideResult = normalizeAcpSpawnThinkingOverride(params.thinking);
+  if (!thinkingOverrideResult.ok) {
+    return {
+      status: "error",
+      error: thinkingOverrideResult.error,
+    };
+  }
+  const thinkingOverride = thinkingOverrideResult.value;
   if (!isAcpEnabledByPolicy(cfg)) {
     return {
       status: "forbidden",
@@ -350,6 +410,13 @@ export async function spawnAcpDirect(
       runtime: initialized.runtime,
       handle: initialized.handle,
     };
+    await applySpawnRuntimeOverrides({
+      cfg,
+      sessionKey,
+      acpManager,
+      model: modelOverride,
+      thinking: thinkingOverride,
+    });
 
     if (preparedBinding) {
       binding = await bindingService.bind({

@@ -92,6 +92,8 @@ describe("sessions_spawn tool", () => {
       runtime: "acp",
       task: "investigate the failing CI run",
       agentId: "codex",
+      model: "openai-codex/gpt-5.3-codex",
+      thinking: "high",
       cwd: "/workspace",
       thread: true,
       mode: "session",
@@ -107,6 +109,8 @@ describe("sessions_spawn tool", () => {
       expect.objectContaining({
         task: "investigate the failing CI run",
         agentId: "codex",
+        model: "openai-codex/gpt-5.3-codex",
+        thinking: "high",
         cwd: "/workspace",
         thread: true,
         mode: "session",

@@ -1126,6 +1126,75 @@ describe("AcpSessionManager", () => {
     );
   });
 
+  it("persists generic thinking config options and reapplies them on later turns", async () => {
+    const runtimeState = createRuntime();
+    hoisted.requireAcpRuntimeBackendMock.mockReturnValue({
+      id: "acpx",
+      runtime: runtimeState.runtime,
+    });
+
+    let currentMeta: SessionAcpMeta = readySessionMeta();
+    hoisted.readAcpSessionEntryMock.mockImplementation((paramsUnknown: unknown) => {
+      const sessionKey =
+        (paramsUnknown as { sessionKey?: string }).sessionKey ?? "agent:codex:acp:session-1";
+      return {
+        sessionKey,
+        storeSessionKey: sessionKey,
+        acp: currentMeta,
+      };
+    });
+    hoisted.upsertAcpSessionMetaMock.mockImplementation(async (paramsUnknown: unknown) => {
+      const params = paramsUnknown as {
+        mutate: (
+          current: SessionAcpMeta | undefined,
+          entry: { acp?: SessionAcpMeta } | undefined,
+        ) => SessionAcpMeta | null | undefined;
+      };
+      const next = params.mutate(currentMeta, { acp: currentMeta });
+      if (next) {
+        currentMeta = next;
+      }
+      return {
+        sessionId: "session-1",
+        updatedAt: Date.now(),
+        acp: currentMeta,
+      };
+    });
+
+    const manager = new AcpSessionManager();
+    await manager.setSessionConfigOption({
+      cfg: baseCfg,
+      sessionKey: "agent:codex:acp:session-1",
+      key: "thinking",
+      value: "high",
+    });
+
+    expect(runtimeState.setConfigOption).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "thinking",
+        value: "high",
+      }),
+    );
+    expect(currentMeta.runtimeOptions?.backendExtras).toEqual({ thinking: "high" });
+
+    runtimeState.setConfigOption.mockClear();
+
+    await manager.runTurn({
+      cfg: baseCfg,
+      sessionKey: "agent:codex:acp:session-1",
+      text: "do work",
+      mode: "prompt",
+      requestId: "run-1",
+    });
+
+    expect(runtimeState.setConfigOption).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "thinking",
+        value: "high",
+      }),
+    );
+  });
+
   it("returns unsupported-control error when backend does not support set_config_option", async () => {
     const runtimeState = createRuntime();
     const unsupportedRuntime: AcpRuntime = {

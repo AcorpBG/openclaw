@@ -33,6 +33,7 @@ const hoisted = vi.hoisted(() => {
   const sessionBindingListBySessionMock = vi.fn();
   const closeSessionMock = vi.fn();
   const initializeSessionMock = vi.fn();
+  const setSessionConfigOptionMock = vi.fn();
   const startAcpSpawnParentStreamRelayMock = vi.fn();
   const resolveAcpSpawnStreamLogPathMock = vi.fn();
   const state = {
@@ -47,6 +48,7 @@ const hoisted = vi.hoisted(() => {
     sessionBindingListBySessionMock,
     closeSessionMock,
     initializeSessionMock,
+    setSessionConfigOptionMock,
     startAcpSpawnParentStreamRelayMock,
     resolveAcpSpawnStreamLogPathMock,
     state,
@@ -90,6 +92,7 @@ vi.mock("../acp/control-plane/manager.js", () => {
   return {
     getAcpSessionManager: () => ({
       initializeSession: (params: unknown) => hoisted.initializeSessionMock(params),
+      setSessionConfigOption: (params: unknown) => hoisted.setSessionConfigOptionMock(params),
       closeSession: (params: unknown) => hoisted.closeSessionMock(params),
     }),
   };
@@ -226,6 +229,7 @@ describe("spawnAcpDirect", () => {
         },
       };
     });
+    hoisted.setSessionConfigOptionMock.mockReset().mockResolvedValue({});
 
     hoisted.sessionBindingCapabilitiesMock
       .mockReset()
@@ -335,6 +339,120 @@ describe("spawnAcpDirect", () => {
         }),
       }),
     );
+  });
+
+  it("applies model and normalized thinking overrides before binding and first dispatch", async () => {
+    const result = await spawnAcpDirect(
+      {
+        task: "Investigate flaky tests",
+        agentId: "codex",
+        model: "openai-codex/gpt-5.3-codex",
+        thinking: "  x-high  ",
+        mode: "session",
+        thread: true,
+      },
+      {
+        agentSessionKey: "agent:main:main",
+        agentChannel: "discord",
+        agentAccountId: "default",
+        agentTo: "channel:parent-channel",
+      },
+    );
+
+    expect(result.status).toBe("accepted");
+    expect(hoisted.setSessionConfigOptionMock).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        key: "model",
+        value: "openai-codex/gpt-5.3-codex",
+      }),
+    );
+    expect(hoisted.setSessionConfigOptionMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        key: "thinking",
+        value: "xhigh",
+      }),
+    );
+
+    const initializeOrder = hoisted.initializeSessionMock.mock.invocationCallOrder[0];
+    const modelOverrideOrder = hoisted.setSessionConfigOptionMock.mock.invocationCallOrder[0];
+    const bindOrder = hoisted.sessionBindingBindMock.mock.invocationCallOrder[0];
+    const agentCallIndex = hoisted.callGatewayMock.mock.calls.findIndex(
+      (call: unknown[]) => (call[0] as { method?: string }).method === "agent",
+    );
+    const agentDispatchOrder = hoisted.callGatewayMock.mock.invocationCallOrder[agentCallIndex];
+
+    expect(typeof initializeOrder).toBe("number");
+    expect(typeof modelOverrideOrder).toBe("number");
+    expect(typeof bindOrder).toBe("number");
+    expect(typeof agentDispatchOrder).toBe("number");
+    expect(initializeOrder < modelOverrideOrder).toBe(true);
+    expect(modelOverrideOrder < bindOrder).toBe(true);
+    expect(bindOrder < agentDispatchOrder).toBe(true);
+  });
+
+  it("rejects invalid ACP thinking overrides before creating the child session", async () => {
+    const result = await spawnAcpDirect(
+      {
+        task: "Investigate flaky tests",
+        agentId: "codex",
+        thinking: "banana",
+      },
+      {
+        agentSessionKey: "agent:main:main",
+      },
+    );
+
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("Invalid thinking level");
+    expect(hoisted.callGatewayMock).not.toHaveBeenCalled();
+    expect(hoisted.initializeSessionMock).not.toHaveBeenCalled();
+    expect(hoisted.setSessionConfigOptionMock).not.toHaveBeenCalled();
+  });
+
+  it("cleans up and skips initial dispatch when applying ACP runtime overrides fails", async () => {
+    hoisted.setSessionConfigOptionMock.mockRejectedValueOnce(new Error("unsupported config key"));
+
+    const result = await spawnAcpDirect(
+      {
+        task: "Investigate flaky tests",
+        agentId: "codex",
+        thinking: "high",
+      },
+      {
+        agentSessionKey: "agent:main:main",
+      },
+    );
+
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("unsupported config key");
+    expect(hoisted.setSessionConfigOptionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "thinking",
+        value: "high",
+      }),
+    );
+    expect(
+      hoisted.callGatewayMock.mock.calls.some(
+        (call: unknown[]) => (call[0] as { method?: string }).method === "agent",
+      ),
+    ).toBe(false);
+    expect(hoisted.closeSessionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: "spawn-failed",
+      }),
+    );
+    expect(hoisted.sessionBindingUnbindMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: "spawn-failed",
+      }),
+    );
+    expect(
+      hoisted.callGatewayMock.mock.calls.some(
+        (call: unknown[]) => (call[0] as { method?: string }).method === "sessions.delete",
+      ),
+    ).toBe(true);
   });
 
   it("rejects disallowed ACP agents", async () => {

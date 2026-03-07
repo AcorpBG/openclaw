@@ -230,12 +230,15 @@ Notes:
 - `runtime` defaults to `subagent`, so set `runtime: "acp"` explicitly for ACP sessions.
 - If `agentId` is omitted, OpenClaw uses `acp.defaultAgent` when configured.
 - `mode: "session"` requires `thread: true` to keep a persistent bound conversation.
+- `model` and `thinking` are per-spawn ACP runtime overrides and are applied before the first task turn is dispatched.
 
 Interface details:
 
 - `task` (required): initial prompt sent to the ACP session.
 - `runtime` (required for ACP): must be `"acp"`.
 - `agentId` (optional): ACP target harness id. Falls back to `acp.defaultAgent` if set.
+- `model` (optional): per-spawn ACP runtime model override. Maps to runtime config key `model`.
+- `thinking` (optional): per-spawn ACP runtime thinking override. Maps to runtime config key `thinking`. Accepts standard thinking levels such as `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `adaptive`.
 - `thread` (optional, default `false`): request thread binding flow where supported.
 - `mode` (optional): `run` (one-shot) or `session` (persistent).
   - default is `run`
@@ -245,6 +248,7 @@ Interface details:
 - `label` (optional): operator-facing label used in session/banner text.
 - `streamTo` (optional): `"parent"` streams initial ACP run progress summaries back to the requester session as system events.
   - When available, accepted responses include `streamLogPath` pointing to a session-scoped JSONL log (`<sessionId>.acp-stream.jsonl`) you can tail for full relay history.
+- If the ACP backend/runtime rejects `model` or `thinking`, the spawn fails clearly instead of silently falling back to local harness defaults.
 
 ## Sandbox compatibility
 
