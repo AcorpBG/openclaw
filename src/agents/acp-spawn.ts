@@ -1,6 +1,10 @@
 import crypto from "node:crypto";
 import { getAcpSessionManager } from "../acp/control-plane/manager.js";
 import {
+  extractAdvertisedRuntimeConfigOptionKeys,
+  resolveCompatibleRuntimeConfigOptionKey,
+} from "../acp/control-plane/runtime-options.js";
+import {
   cleanupFailedAcpSpawn,
   type AcpSpawnRuntimeCloseHandle,
 } from "../acp/control-plane/spawn.js";
@@ -183,10 +187,29 @@ async function applySpawnRuntimeOverrides(params: {
     });
   }
   if (params.thinking) {
+    const sessionStatus = await params.acpManager.getSessionStatus({
+      cfg: params.cfg,
+      sessionKey: params.sessionKey,
+    });
+    const resolvedThinkingKey = resolveCompatibleRuntimeConfigOptionKey({
+      semanticOption: "thinking",
+      capabilities: sessionStatus.capabilities,
+      runtimeStatus: sessionStatus.runtimeStatus,
+    });
+    if (!resolvedThinkingKey) {
+      const advertisedKeys = extractAdvertisedRuntimeConfigOptionKeys({
+        capabilities: sessionStatus.capabilities,
+        runtimeStatus: sessionStatus.runtimeStatus,
+      });
+      const advertisedKeysText = advertisedKeys.length > 0 ? advertisedKeys.join(", ") : "none";
+      throw new Error(
+        `ACP backend "${sessionStatus.backend}" does not advertise a compatible thinking config key for session spawn overrides. Expected one of: thinking, reasoning_effort. Advertised keys: ${advertisedKeysText}.`,
+      );
+    }
     await params.acpManager.setSessionConfigOption({
       cfg: params.cfg,
       sessionKey: params.sessionKey,
-      key: "thinking",
+      key: resolvedThinkingKey,
       value: params.thinking,
     });
   }

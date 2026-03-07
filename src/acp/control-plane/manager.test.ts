@@ -1126,7 +1126,7 @@ describe("AcpSessionManager", () => {
     );
   });
 
-  it("persists generic thinking config options and reapplies them on later turns", async () => {
+  it("persists raw backend config keys and reapplies them on later turns", async () => {
     const runtimeState = createRuntime();
     hoisted.requireAcpRuntimeBackendMock.mockReturnValue({
       id: "acpx",
@@ -1165,17 +1165,17 @@ describe("AcpSessionManager", () => {
     await manager.setSessionConfigOption({
       cfg: baseCfg,
       sessionKey: "agent:codex:acp:session-1",
-      key: "thinking",
+      key: "reasoning_effort",
       value: "high",
     });
 
     expect(runtimeState.setConfigOption).toHaveBeenCalledWith(
       expect.objectContaining({
-        key: "thinking",
+        key: "reasoning_effort",
         value: "high",
       }),
     );
-    expect(currentMeta.runtimeOptions?.backendExtras).toEqual({ thinking: "high" });
+    expect(currentMeta.runtimeOptions?.backendExtras).toEqual({ reasoning_effort: "high" });
 
     runtimeState.setConfigOption.mockClear();
 
@@ -1189,7 +1189,7 @@ describe("AcpSessionManager", () => {
 
     expect(runtimeState.setConfigOption).toHaveBeenCalledWith(
       expect.objectContaining({
-        key: "thinking",
+        key: "reasoning_effort",
         value: "high",
       }),
     );

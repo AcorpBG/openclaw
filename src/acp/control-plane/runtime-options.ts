@@ -1,6 +1,7 @@
 import { isAbsolute } from "node:path";
 import type { AcpSessionRuntimeOptions, SessionAcpMeta } from "../../config/sessions/types.js";
 import { AcpRuntimeError } from "../runtime/errors.js";
+import type { AcpRuntimeCapabilities, AcpRuntimeStatus } from "../runtime/types.js";
 
 const MAX_RUNTIME_MODE_LENGTH = 64;
 const MAX_MODEL_LENGTH = 200;
@@ -11,8 +12,14 @@ const MAX_TIMEOUT_SECONDS = 24 * 60 * 60;
 const MAX_BACKEND_OPTION_KEY_LENGTH = 64;
 const MAX_BACKEND_OPTION_VALUE_LENGTH = 512;
 const MAX_BACKEND_EXTRAS = 32;
+const ACP_SEMANTIC_RUNTIME_CONFIG_OPTION_KEYS = {
+  model: ["model"],
+  thinking: ["thinking", "reasoning_effort"],
+} as const;
 
 const SAFE_OPTION_KEY_RE = /^[a-z0-9][a-z0-9._:-]*$/i;
+
+type SemanticAcpRuntimeConfigOption = keyof typeof ACP_SEMANTIC_RUNTIME_CONFIG_OPTION_KEYS;
 
 function failInvalidOption(message: string): never {
   throw new AcpRuntimeError("ACP_INVALID_RUNTIME_OPTION", message);
@@ -129,6 +136,61 @@ export function validateRuntimeConfigOptionInput(
     key: validateBackendOptionKey(rawKey),
     value: validateBackendOptionValue(rawValue),
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function collectAdvertisedConfigOptionKeysFromNode(node: unknown, keys: Set<string>): void {
+  if (!Array.isArray(node)) {
+    return;
+  }
+  for (const entry of node) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+    const id = normalizeText(entry.id);
+    if (id) {
+      keys.add(id);
+    }
+  }
+}
+
+export function extractAdvertisedRuntimeConfigOptionKeys(params: {
+  capabilities?: Pick<AcpRuntimeCapabilities, "configOptionKeys">;
+  runtimeStatus?: Pick<AcpRuntimeStatus, "details">;
+}): string[] {
+  const capabilityKeys = (params.capabilities?.configOptionKeys ?? [])
+    .map((entry) => normalizeText(entry))
+    .filter(Boolean) as string[];
+  if (capabilityKeys.length > 0) {
+    return [...new Set(capabilityKeys)];
+  }
+
+  const details = params.runtimeStatus?.details;
+  if (!isRecord(details)) {
+    return [];
+  }
+
+  const keys = new Set<string>();
+  collectAdvertisedConfigOptionKeysFromNode(details.configOptions, keys);
+  if (isRecord(details.result)) {
+    collectAdvertisedConfigOptionKeysFromNode(details.result.configOptions, keys);
+  }
+  return [...keys];
+}
+
+export function resolveCompatibleRuntimeConfigOptionKey(params: {
+  semanticOption: SemanticAcpRuntimeConfigOption;
+  capabilities?: Pick<AcpRuntimeCapabilities, "configOptionKeys">;
+  runtimeStatus?: Pick<AcpRuntimeStatus, "details">;
+}): string | undefined {
+  const compatibleKeys = ACP_SEMANTIC_RUNTIME_CONFIG_OPTION_KEYS[params.semanticOption];
+  const advertisedKeys = new Set(
+    extractAdvertisedRuntimeConfigOptionKeys(params).map((entry) => entry.toLowerCase()),
+  );
+  return compatibleKeys.find((entry) => advertisedKeys.has(entry.toLowerCase()));
 }
 
 export function validateRuntimeOptionPatch(

@@ -295,6 +295,8 @@ describe("AcpxRuntime", () => {
     expect(capabilities.controls).toContain("session/set_mode");
     expect(capabilities.controls).toContain("session/set_config_option");
     expect(capabilities.controls).toContain("session/status");
+    const sessionCapabilities = await runtime.getCapabilities({ handle });
+    expect(sessionCapabilities.configOptionKeys).toEqual(["model", "reasoning_effort"]);
 
     await runtime.setMode({
       handle,
@@ -320,6 +322,28 @@ describe("AcpxRuntime", () => {
     expect(logs.find((entry) => entry.kind === "set-mode")?.mode).toBe("plan");
     expect(logs.find((entry) => entry.kind === "set")?.key).toBe("model");
     expect(logs.find((entry) => entry.kind === "status")).toBeDefined();
+  });
+
+  it("discovers config option keys from nested JSON-RPC status results", async () => {
+    const previousShape = process.env.MOCK_ACPX_STATUS_SHAPE;
+    process.env.MOCK_ACPX_STATUS_SHAPE = "nested-result";
+    try {
+      const { runtime } = await createMockRuntimeFixture();
+      const handle = await runtime.ensureSession({
+        sessionKey: "agent:codex:acp:nested-status",
+        agent: "codex",
+        mode: "persistent",
+      });
+
+      const capabilities = await runtime.getCapabilities({ handle });
+      expect(capabilities.configOptionKeys).toEqual(["model", "reasoning_effort"]);
+    } finally {
+      if (previousShape === undefined) {
+        delete process.env.MOCK_ACPX_STATUS_SHAPE;
+      } else {
+        process.env.MOCK_ACPX_STATUS_SHAPE = previousShape;
+      }
+    }
   });
 
   it("skips prompt execution when runTurn starts with an already-aborted signal", async () => {

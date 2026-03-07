@@ -47,6 +47,35 @@ const ACPX_CAPABILITIES: AcpRuntimeCapabilities = {
   controls: ["session/set_mode", "session/set_config_option", "session/status"],
 };
 
+function collectConfigOptionKeysFromStatusNode(node: unknown, keys: Set<string>): void {
+  if (!Array.isArray(node)) {
+    return;
+  }
+  for (const entry of node) {
+    if (!isRecord(entry)) {
+      continue;
+    }
+    const id = asTrimmedString(entry.id);
+    if (id) {
+      keys.add(id);
+    }
+  }
+}
+
+function extractConfigOptionKeysFromStatusDetail(
+  detail: Record<string, unknown> | undefined,
+): string[] {
+  if (!detail) {
+    return [];
+  }
+  const keys = new Set<string>();
+  collectConfigOptionKeysFromStatusNode(detail.configOptions, keys);
+  if (isRecord(detail.result)) {
+    collectConfigOptionKeysFromStatusNode(detail.result.configOptions, keys);
+  }
+  return [...keys];
+}
+
 function formatPermissionModeGuidance(): string {
   return "Configure plugins.entries.acpx.config.permissionMode to one of: approve-reads, approve-all, deny-all.";
 }
@@ -372,8 +401,24 @@ export class AcpxRuntime implements AcpRuntime {
     }
   }
 
-  getCapabilities(): AcpRuntimeCapabilities {
-    return ACPX_CAPABILITIES;
+  getCapabilities(): AcpRuntimeCapabilities;
+  getCapabilities(input: { handle: AcpRuntimeHandle }): Promise<AcpRuntimeCapabilities>;
+  getCapabilities(input?: {
+    handle?: AcpRuntimeHandle;
+  }): AcpRuntimeCapabilities | Promise<AcpRuntimeCapabilities> {
+    if (!input?.handle) {
+      return {
+        controls: [...ACPX_CAPABILITIES.controls],
+      };
+    }
+    return (async () => {
+      const status = await this.getStatus({ handle: input.handle });
+      const configOptionKeys = extractConfigOptionKeysFromStatusDetail(status.details);
+      return {
+        controls: [...ACPX_CAPABILITIES.controls],
+        ...(configOptionKeys.length > 0 ? { configOptionKeys } : {}),
+      };
+    })();
   }
 
   async getStatus(input: {

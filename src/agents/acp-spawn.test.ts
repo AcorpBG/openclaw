@@ -33,6 +33,7 @@ const hoisted = vi.hoisted(() => {
   const sessionBindingListBySessionMock = vi.fn();
   const closeSessionMock = vi.fn();
   const initializeSessionMock = vi.fn();
+  const getSessionStatusMock = vi.fn();
   const setSessionConfigOptionMock = vi.fn();
   const startAcpSpawnParentStreamRelayMock = vi.fn();
   const resolveAcpSpawnStreamLogPathMock = vi.fn();
@@ -48,6 +49,7 @@ const hoisted = vi.hoisted(() => {
     sessionBindingListBySessionMock,
     closeSessionMock,
     initializeSessionMock,
+    getSessionStatusMock,
     setSessionConfigOptionMock,
     startAcpSpawnParentStreamRelayMock,
     resolveAcpSpawnStreamLogPathMock,
@@ -92,6 +94,7 @@ vi.mock("../acp/control-plane/manager.js", () => {
   return {
     getAcpSessionManager: () => ({
       initializeSession: (params: unknown) => hoisted.initializeSessionMock(params),
+      getSessionStatus: (params: unknown) => hoisted.getSessionStatusMock(params),
       setSessionConfigOption: (params: unknown) => hoisted.setSessionConfigOptionMock(params),
       closeSession: (params: unknown) => hoisted.closeSessionMock(params),
     }),
@@ -229,6 +232,24 @@ describe("spawnAcpDirect", () => {
         },
       };
     });
+    hoisted.getSessionStatusMock.mockReset().mockResolvedValue({
+      sessionKey: "agent:codex:acp:child",
+      backend: "acpx",
+      agent: "codex",
+      state: "idle",
+      mode: "persistent",
+      runtimeOptions: {},
+      capabilities: {
+        controls: ["session/set_mode", "session/set_config_option", "session/status"],
+        configOptionKeys: ["model", "reasoning_effort"],
+      },
+      runtimeStatus: {
+        details: {
+          configOptions: [{ id: "model" }, { id: "reasoning_effort" }],
+        },
+      },
+      lastActivityAt: Date.now(),
+    });
     hoisted.setSessionConfigOptionMock.mockReset().mockResolvedValue({});
 
     hoisted.sessionBindingCapabilitiesMock
@@ -341,7 +362,7 @@ describe("spawnAcpDirect", () => {
     );
   });
 
-  it("applies model and normalized thinking overrides before binding and first dispatch", async () => {
+  it("applies model and backend-resolved thinking overrides before binding and first dispatch", async () => {
     const result = await spawnAcpDirect(
       {
         task: "Investigate flaky tests",
@@ -370,7 +391,7 @@ describe("spawnAcpDirect", () => {
     expect(hoisted.setSessionConfigOptionMock).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
-        key: "thinking",
+        key: "reasoning_effort",
         value: "xhigh",
       }),
     );
@@ -390,6 +411,46 @@ describe("spawnAcpDirect", () => {
     expect(initializeOrder < modelOverrideOrder).toBe(true);
     expect(modelOverrideOrder < bindOrder).toBe(true);
     expect(bindOrder < agentDispatchOrder).toBe(true);
+  });
+
+  it("uses the backend-advertised plain thinking key when available", async () => {
+    hoisted.getSessionStatusMock.mockResolvedValueOnce({
+      sessionKey: "agent:codex:acp:child",
+      backend: "acpx",
+      agent: "codex",
+      state: "idle",
+      mode: "persistent",
+      runtimeOptions: {},
+      capabilities: {
+        controls: ["session/set_mode", "session/set_config_option", "session/status"],
+        configOptionKeys: ["model", "thinking"],
+      },
+      runtimeStatus: {
+        details: {
+          configOptions: [{ id: "model" }, { id: "thinking" }],
+        },
+      },
+      lastActivityAt: Date.now(),
+    });
+
+    const result = await spawnAcpDirect(
+      {
+        task: "Investigate flaky tests",
+        agentId: "codex",
+        thinking: "high",
+      },
+      {
+        agentSessionKey: "agent:main:main",
+      },
+    );
+
+    expect(result.status).toBe("accepted");
+    expect(hoisted.setSessionConfigOptionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "thinking",
+        value: "high",
+      }),
+    );
   });
 
   it("rejects invalid ACP thinking overrides before creating the child session", async () => {
@@ -429,7 +490,7 @@ describe("spawnAcpDirect", () => {
     expect(result.error).toContain("unsupported config key");
     expect(hoisted.setSessionConfigOptionMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        key: "thinking",
+        key: "reasoning_effort",
         value: "high",
       }),
     );
@@ -453,6 +514,53 @@ describe("spawnAcpDirect", () => {
         (call: unknown[]) => (call[0] as { method?: string }).method === "sessions.delete",
       ),
     ).toBe(true);
+  });
+
+  it("fails before binding and dispatch when ACP does not advertise a compatible thinking key", async () => {
+    hoisted.getSessionStatusMock.mockResolvedValueOnce({
+      sessionKey: "agent:codex:acp:child",
+      backend: "acpx",
+      agent: "codex",
+      state: "idle",
+      mode: "persistent",
+      runtimeOptions: {},
+      capabilities: {
+        controls: ["session/set_mode", "session/set_config_option", "session/status"],
+        configOptionKeys: ["model", "temperature"],
+      },
+      runtimeStatus: {
+        details: {
+          configOptions: [{ id: "model" }, { id: "temperature" }],
+        },
+      },
+      lastActivityAt: Date.now(),
+    });
+
+    const result = await spawnAcpDirect(
+      {
+        task: "Investigate flaky tests",
+        agentId: "codex",
+        thinking: "high",
+        mode: "session",
+        thread: true,
+      },
+      {
+        agentSessionKey: "agent:main:main",
+        agentChannel: "discord",
+        agentAccountId: "default",
+        agentTo: "channel:parent-channel",
+      },
+    );
+
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("does not advertise a compatible thinking config key");
+    expect(hoisted.setSessionConfigOptionMock).not.toHaveBeenCalled();
+    expect(hoisted.sessionBindingBindMock).not.toHaveBeenCalled();
+    expect(
+      hoisted.callGatewayMock.mock.calls.some(
+        (call: unknown[]) => (call[0] as { method?: string }).method === "agent",
+      ),
+    ).toBe(false);
   });
 
   it("rejects disallowed ACP agents", async () => {

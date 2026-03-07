@@ -72,6 +72,10 @@ const closeName =
 const setModeValue = command === "set-mode" ? String(args[commandIndex + 1] || "") : "";
 const setKey = command === "set" ? String(args[commandIndex + 1] || "") : "";
 const setValue = command === "set" ? String(args[commandIndex + 2] || "") : "";
+const statusConfigOptions = [
+  { id: "model", currentValue: "gpt-5.4" },
+  { id: "reasoning_effort", currentValue: "medium" },
+];
 
 if (command === "sessions" && args[commandIndex + 1] === "ensure") {
   writeLog({ kind: "ensure", agent, args, sessionName: ensureName });
@@ -146,14 +150,21 @@ if (command === "set") {
 
 if (command === "status") {
   writeLog({ kind: "status", agent, args, sessionName: sessionFromOption });
-  emitJson({
+  const payload = {
     acpxRecordId: sessionFromOption ? "rec-" + sessionFromOption : null,
     acpxSessionId: sessionFromOption ? "sid-" + sessionFromOption : null,
     agentSessionId: sessionFromOption ? "inner-" + sessionFromOption : null,
     status: sessionFromOption ? "alive" : "no-session",
     pid: 4242,
     uptime: 120,
-  });
+  };
+  const statusShape = process.env.MOCK_ACPX_STATUS_SHAPE || "top-level";
+  if (statusShape === "nested-result") {
+    payload.result = { configOptions: statusConfigOptions };
+  } else {
+    payload.configOptions = statusConfigOptions;
+  }
+  emitJson(payload);
   process.exit(0);
 }
 
