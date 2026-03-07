@@ -453,6 +453,46 @@ describe("spawnAcpDirect", () => {
     );
   });
 
+  it("uses compatible thinking keys exposed only in runtime status when capabilities are partial", async () => {
+    hoisted.getSessionStatusMock.mockResolvedValueOnce({
+      sessionKey: "agent:codex:acp:child",
+      backend: "acpx",
+      agent: "codex",
+      state: "idle",
+      mode: "persistent",
+      runtimeOptions: {},
+      capabilities: {
+        controls: ["session/set_mode", "session/set_config_option", "session/status"],
+        configOptionKeys: ["model"],
+      },
+      runtimeStatus: {
+        details: {
+          configOptions: [{ id: "model" }, { id: "Reasoning_Effort" }],
+        },
+      },
+      lastActivityAt: Date.now(),
+    });
+
+    const result = await spawnAcpDirect(
+      {
+        task: "Investigate flaky tests",
+        agentId: "codex",
+        thinking: "high",
+      },
+      {
+        agentSessionKey: "agent:main:main",
+      },
+    );
+
+    expect(result.status).toBe("accepted");
+    expect(hoisted.setSessionConfigOptionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        key: "Reasoning_Effort",
+        value: "high",
+      }),
+    );
+  });
+
   it("rejects invalid ACP thinking overrides before creating the child session", async () => {
     const result = await spawnAcpDirect(
       {

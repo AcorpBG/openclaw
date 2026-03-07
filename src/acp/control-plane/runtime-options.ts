@@ -161,22 +161,20 @@ export function extractAdvertisedRuntimeConfigOptionKeys(params: {
   capabilities?: Pick<AcpRuntimeCapabilities, "configOptionKeys">;
   runtimeStatus?: Pick<AcpRuntimeStatus, "details">;
 }): string[] {
-  const capabilityKeys = (params.capabilities?.configOptionKeys ?? [])
-    .map((entry) => normalizeText(entry))
-    .filter(Boolean) as string[];
-  if (capabilityKeys.length > 0) {
-    return [...new Set(capabilityKeys)];
+  const keys = new Set<string>();
+  for (const capabilityKey of params.capabilities?.configOptionKeys ?? []) {
+    const normalizedKey = normalizeText(capabilityKey);
+    if (normalizedKey) {
+      keys.add(normalizedKey);
+    }
   }
 
   const details = params.runtimeStatus?.details;
-  if (!isRecord(details)) {
-    return [];
-  }
-
-  const keys = new Set<string>();
-  collectAdvertisedConfigOptionKeysFromNode(details.configOptions, keys);
-  if (isRecord(details.result)) {
-    collectAdvertisedConfigOptionKeysFromNode(details.result.configOptions, keys);
+  if (isRecord(details)) {
+    collectAdvertisedConfigOptionKeysFromNode(details.configOptions, keys);
+    if (isRecord(details.result)) {
+      collectAdvertisedConfigOptionKeysFromNode(details.result.configOptions, keys);
+    }
   }
   return [...keys];
 }
@@ -187,10 +185,20 @@ export function resolveCompatibleRuntimeConfigOptionKey(params: {
   runtimeStatus?: Pick<AcpRuntimeStatus, "details">;
 }): string | undefined {
   const compatibleKeys = ACP_SEMANTIC_RUNTIME_CONFIG_OPTION_KEYS[params.semanticOption];
-  const advertisedKeys = new Set(
-    extractAdvertisedRuntimeConfigOptionKeys(params).map((entry) => entry.toLowerCase()),
-  );
-  return compatibleKeys.find((entry) => advertisedKeys.has(entry.toLowerCase()));
+  const advertisedKeys = new Map<string, string>();
+  for (const advertisedKey of extractAdvertisedRuntimeConfigOptionKeys(params)) {
+    const normalizedKey = advertisedKey.toLowerCase();
+    if (!advertisedKeys.has(normalizedKey)) {
+      advertisedKeys.set(normalizedKey, advertisedKey);
+    }
+  }
+  for (const compatibleKey of compatibleKeys) {
+    const resolvedKey = advertisedKeys.get(compatibleKey.toLowerCase());
+    if (resolvedKey) {
+      return resolvedKey;
+    }
+  }
+  return undefined;
 }
 
 export function validateRuntimeOptionPatch(
