@@ -23,11 +23,6 @@ type AcpMcpServer = {
   env: Array<{ name: string; value: string }>;
 };
 
-export type ResolvedAcpxAgentCommand = {
-  command: string;
-  source: "config-override" | "builtin-fallback" | "agent-id";
-};
-
 function normalizeAgentName(value: string): string {
   return value.trim().toLowerCase();
 }
@@ -88,52 +83,19 @@ async function loadAgentOverrides(params: {
   }
 }
 
-export async function resolveAcpxAgentCommandWithSource(params: {
-  acpxCommand: string;
-  cwd: string;
-  agent: string;
-  spawnOptions?: SpawnCommandOptions;
-}): Promise<ResolvedAcpxAgentCommand> {
-  const normalizedAgent = normalizeAgentName(params.agent);
-  const overrides = await loadAgentOverrides({
-    acpxCommand: params.acpxCommand,
-    cwd: params.cwd,
-    spawnOptions: params.spawnOptions,
-  });
-  const configured = overrides[normalizedAgent];
-  if (configured) {
-    return {
-      command: configured,
-      source: "config-override",
-    };
-  }
-  const builtin = ACPX_BUILTIN_AGENT_COMMANDS[normalizedAgent];
-  if (builtin) {
-    return {
-      command: builtin,
-      source: "builtin-fallback",
-    };
-  }
-  return {
-    command: params.agent,
-    source: "agent-id",
-  };
-}
-
 export async function resolveAcpxAgentCommand(params: {
   acpxCommand: string;
   cwd: string;
   agent: string;
   spawnOptions?: SpawnCommandOptions;
 }): Promise<string> {
-  return (
-    await resolveAcpxAgentCommandWithSource({
-      acpxCommand: params.acpxCommand,
-      cwd: params.cwd,
-      agent: params.agent,
-      spawnOptions: params.spawnOptions,
-    })
-  ).command;
+  const normalizedAgent = normalizeAgentName(params.agent);
+  const overrides = await loadAgentOverrides({
+    acpxCommand: params.acpxCommand,
+    cwd: params.cwd,
+    spawnOptions: params.spawnOptions,
+  });
+  return overrides[normalizedAgent] ?? ACPX_BUILTIN_AGENT_COMMANDS[normalizedAgent] ?? params.agent;
 }
 
 export function buildMcpProxyAgentCommand(params: {

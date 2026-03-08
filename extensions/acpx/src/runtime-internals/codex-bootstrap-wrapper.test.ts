@@ -49,18 +49,14 @@ process.stdout.write(JSON.stringify(process.argv.slice(2)) + "\n");
     ).toString("base64url");
 
     const child = spawn(process.execPath, [wrapperPath, "--payload", payload], {
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ["pipe", "pipe", "inherit"],
       cwd: process.cwd(),
     });
     child.stdin.end();
 
     let stdout = "";
-    let stderr = "";
     child.stdout.on("data", (chunk) => {
       stdout += String(chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
     });
 
     const exitCode = await new Promise<number | null>((resolve) => {
@@ -75,9 +71,5 @@ process.stdout.write(JSON.stringify(process.argv.slice(2)) + "\n");
       "-c",
       'model_reasoning_effort="high"',
     ]);
-    expect(stderr).toContain("[acpx-codex-wrapper] decoded payload");
-    expect(stderr).toContain("model=gpt-5.3-codex-spark");
-    expect(stderr).toContain("reasoning=high");
-    expect(stderr).toContain("[acpx-codex-wrapper] spawn child command=");
   });
 });
