@@ -233,6 +233,7 @@ export class AcpSessionManager {
             agent,
             mode: input.mode,
             cwd: requestedCwd,
+            env: input.env,
           }),
         fallbackCode: "ACP_SESSION_INIT_FAILED",
         fallbackMessage: "Could not initialize ACP session runtime.",

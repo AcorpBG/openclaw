@@ -375,6 +375,55 @@ describe("AcpxRuntime", () => {
     }
   });
 
+  it("routes Codex ACP spawns through a dedicated bootstrap wrapper and reuses it for later verbs", async () => {
+    const { runtime, logPath } = await createMockRuntimeFixture();
+    const handle = await runtime.ensureSession({
+      sessionKey: "agent:codex:acp:codex-bootstrap",
+      agent: "codex",
+      mode: "persistent",
+      env: {
+        OPENCLAW_ACPX_CODEX_BOOTSTRAP: Buffer.from(
+          JSON.stringify({
+            model: "gpt-5.3-codex-spark",
+            reasoningEffort: "high",
+          }),
+          "utf8",
+        ).toString("base64url"),
+      },
+    });
+    await runtime.getStatus({ handle });
+
+    const decoded = decodeAcpxRuntimeHandleState(handle.runtimeSessionName);
+    expect(decoded?.codexBootstrap).toEqual({
+      model: "gpt-5.3-codex-spark",
+      reasoningEffort: "high",
+    });
+
+    const logs = await readMockRuntimeLogEntries(logPath);
+    const ensureArgs = (logs.find((entry) => entry.kind === "ensure")?.args as string[]) ?? [];
+    const statusArgs = (logs.find((entry) => entry.kind === "status")?.args as string[]) ?? [];
+
+    for (const args of [ensureArgs, statusArgs]) {
+      const agentFlagIndex = args.indexOf("--agent");
+      expect(agentFlagIndex).toBeGreaterThanOrEqual(0);
+      const rawAgentCommand = args[agentFlagIndex + 1];
+      expect(rawAgentCommand).toContain("codex-bootstrap-wrapper.mjs");
+      const payloadMatch = rawAgentCommand.match(/--payload\s+([A-Za-z0-9_-]+)/);
+      expect(payloadMatch?.[1]).toBeDefined();
+      const payload = JSON.parse(
+        Buffer.from(String(payloadMatch?.[1]), "base64url").toString("utf8"),
+      ) as {
+        targetCommand: string;
+        bootstrap: { model?: string; reasoningEffort?: string };
+      };
+      expect(payload.targetCommand).toContain("@zed-industries/codex-acp");
+      expect(payload.bootstrap).toEqual({
+        model: "gpt-5.3-codex-spark",
+        reasoningEffort: "high",
+      });
+    }
+  });
+
   it("skips prompt execution when runTurn starts with an already-aborted signal", async () => {
     const { runtime, logPath } = await createMockRuntimeFixture();
     const handle = await runtime.ensureSession({

@@ -14,6 +14,7 @@ import type {
 import { AcpRuntimeError } from "openclaw/plugin-sdk/acpx";
 import { toAcpMcpServers, type ResolvedAcpxPluginConfig } from "./config.js";
 import { checkAcpxVersion } from "./ensure.js";
+import { buildCodexBootstrapAgentCommand } from "./runtime-internals/codex-agent-command.js";
 import {
   parseJsonLines,
   parsePromptEventLine,
@@ -38,6 +39,7 @@ import {
   buildPermissionArgs,
   deriveAgentFromSessionKey,
   isRecord,
+  type AcpxCodexBootstrapState,
   type AcpxHandleState,
   type AcpxJsonObject,
 } from "./runtime-internals/shared.js";
@@ -47,6 +49,7 @@ export const ACPX_BACKEND_ID = "acpx";
 const ACPX_RUNTIME_HANDLE_PREFIX = "acpx:v1:";
 const DEFAULT_AGENT_FALLBACK = "codex";
 const ACPX_EXIT_CODE_PERMISSION_DENIED = 5;
+const ACPX_CODEX_BOOTSTRAP_ENV_KEY = "OPENCLAW_ACPX_CODEX_BOOTSTRAP";
 const ACPX_CAPABILITIES: AcpRuntimeCapabilities = {
   controls: ["session/set_mode", "session/set_config_option", "session/status"],
 };
@@ -94,6 +97,7 @@ export function decodeAcpxRuntimeHandleState(runtimeSessionName: string): AcpxHa
     const agent = asTrimmedString(parsed.agent);
     const cwd = asTrimmedString(parsed.cwd);
     const mode = asTrimmedString(parsed.mode);
+    const codexBootstrap = parseCodexBootstrapState(parsed.codexBootstrap);
     const acpxRecordId = asOptionalString(parsed.acpxRecordId);
     const backendSessionId = asOptionalString(parsed.backendSessionId);
     const agentSessionId = asOptionalString(parsed.agentSessionId);
@@ -108,6 +112,7 @@ export function decodeAcpxRuntimeHandleState(runtimeSessionName: string): AcpxHa
       agent,
       cwd,
       mode,
+      ...(codexBootstrap ? { codexBootstrap } : {}),
       ...(acpxRecordId ? { acpxRecordId } : {}),
       ...(backendSessionId ? { backendSessionId } : {}),
       ...(agentSessionId ? { agentSessionId } : {}),
@@ -117,12 +122,42 @@ export function decodeAcpxRuntimeHandleState(runtimeSessionName: string): AcpxHa
   }
 }
 
+function parseCodexBootstrapState(value: unknown): AcpxCodexBootstrapState | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const model = asOptionalString(value.model);
+  const reasoningEffort = asOptionalString(value.reasoningEffort);
+  if (!model && !reasoningEffort) {
+    return undefined;
+  }
+  return {
+    ...(model ? { model } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+  };
+}
+
+function decodeCodexBootstrapEnv(
+  env?: Record<string, string>,
+): AcpxCodexBootstrapState | undefined {
+  const encoded = env?.[ACPX_CODEX_BOOTSTRAP_ENV_KEY];
+  if (!encoded) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as unknown;
+    return parseCodexBootstrapState(parsed);
+  } catch {
+    return undefined;
+  }
+}
+
 export class AcpxRuntime implements AcpRuntime {
   private healthy = false;
   private readonly logger?: PluginLogger;
   private readonly queueOwnerTtlSeconds: number;
   private readonly spawnCommandCache: SpawnCommandCache = {};
-  private readonly mcpProxyAgentCommandCache = new Map<string, string>();
+  private readonly agentCommandCache = new Map<string, string>();
   private readonly spawnCommandOptions: SpawnCommandOptions;
   private readonly loggedSpawnResolutions = new Set<string>();
 
@@ -203,9 +238,11 @@ export class AcpxRuntime implements AcpRuntime {
     }
     const cwd = asTrimmedString(input.cwd) || this.config.cwd;
     const mode = input.mode;
+    const codexBootstrap = agent === "codex" ? decodeCodexBootstrapEnv(input.env) : undefined;
     const ensureCommand = await this.buildVerbArgs({
       agent,
       cwd,
+      codexBootstrap,
       command: ["sessions", "ensure", "--name", sessionName],
     });
 
@@ -225,6 +262,7 @@ export class AcpxRuntime implements AcpRuntime {
       const newCommand = await this.buildVerbArgs({
         agent,
         cwd,
+        codexBootstrap,
         command: ["sessions", "new", "--name", sessionName],
       });
       events = await this.runControlCommand({
@@ -260,6 +298,7 @@ export class AcpxRuntime implements AcpRuntime {
         agent,
         cwd,
         mode,
+        ...(codexBootstrap ? { codexBootstrap } : {}),
         ...(acpxRecordId ? { acpxRecordId } : {}),
         ...(backendSessionId ? { backendSessionId } : {}),
         ...(agentSessionId ? { agentSessionId } : {}),
@@ -277,6 +316,7 @@ export class AcpxRuntime implements AcpRuntime {
       agent: state.agent,
       sessionName: state.name,
       cwd: state.cwd,
+      codexBootstrap: state.codexBootstrap,
     });
 
     const cancelOnAbort = async () => {
@@ -393,6 +433,7 @@ export class AcpxRuntime implements AcpRuntime {
     const args = await this.buildVerbArgs({
       agent: state.agent,
       cwd: state.cwd,
+      codexBootstrap: state.codexBootstrap,
       command: ["status", "--session", state.name],
     });
     const events = await this.runControlCommand({
@@ -439,6 +480,7 @@ export class AcpxRuntime implements AcpRuntime {
     const args = await this.buildVerbArgs({
       agent: state.agent,
       cwd: state.cwd,
+      codexBootstrap: state.codexBootstrap,
       command: ["set-mode", mode, "--session", state.name],
     });
     await this.runControlCommand({
@@ -462,6 +504,7 @@ export class AcpxRuntime implements AcpRuntime {
     const args = await this.buildVerbArgs({
       agent: state.agent,
       cwd: state.cwd,
+      codexBootstrap: state.codexBootstrap,
       command: ["set", key, value, "--session", state.name],
     });
     await this.runControlCommand({
@@ -557,6 +600,7 @@ export class AcpxRuntime implements AcpRuntime {
     const args = await this.buildVerbArgs({
       agent: state.agent,
       cwd: state.cwd,
+      codexBootstrap: state.codexBootstrap,
       command: ["cancel", "--session", state.name],
     });
     await this.runControlCommand({
@@ -572,6 +616,7 @@ export class AcpxRuntime implements AcpRuntime {
     const args = await this.buildVerbArgs({
       agent: state.agent,
       cwd: state.cwd,
+      codexBootstrap: state.codexBootstrap,
       command: ["sessions", "close", state.name],
     });
     await this.runControlCommand({
@@ -608,6 +653,7 @@ export class AcpxRuntime implements AcpRuntime {
     agent: string;
     sessionName: string;
     cwd: string;
+    codexBootstrap?: AcpxCodexBootstrapState;
   }): Promise<string[]> {
     const prefix = [
       "--format",
@@ -626,6 +672,7 @@ export class AcpxRuntime implements AcpRuntime {
     return await this.buildVerbArgs({
       agent: params.agent,
       cwd: params.cwd,
+      codexBootstrap: params.codexBootstrap,
       command: ["prompt", "--session", params.sessionName, "--file", "-"],
       prefix,
     });
@@ -636,11 +683,13 @@ export class AcpxRuntime implements AcpRuntime {
     cwd: string;
     command: string[];
     prefix?: string[];
+    codexBootstrap?: AcpxCodexBootstrapState;
   }): Promise<string[]> {
     const prefix = params.prefix ?? ["--format", "json", "--json-strict", "--cwd", params.cwd];
     const agentCommand = await this.resolveRawAgentCommand({
       agent: params.agent,
       cwd: params.cwd,
+      codexBootstrap: params.codexBootstrap,
     });
     if (!agentCommand) {
       return [...prefix, params.agent, ...params.command];
@@ -651,27 +700,46 @@ export class AcpxRuntime implements AcpRuntime {
   private async resolveRawAgentCommand(params: {
     agent: string;
     cwd: string;
+    codexBootstrap?: AcpxCodexBootstrapState;
   }): Promise<string | null> {
-    if (Object.keys(this.config.mcpServers).length === 0) {
+    const wantsMcpProxy = Object.keys(this.config.mcpServers).length > 0;
+    const wantsCodexBootstrap = Boolean(
+      params.codexBootstrap?.model || params.codexBootstrap?.reasoningEffort,
+    );
+    if (!wantsMcpProxy && !wantsCodexBootstrap) {
       return null;
     }
-    const cacheKey = `${params.cwd}::${params.agent}`;
-    const cached = this.mcpProxyAgentCommandCache.get(cacheKey);
+    const cacheKey = [
+      params.cwd,
+      params.agent,
+      params.codexBootstrap?.model ?? "",
+      params.codexBootstrap?.reasoningEffort ?? "",
+      wantsMcpProxy ? "mcp" : "nomcp",
+    ].join("::");
+    const cached = this.agentCommandCache.get(cacheKey);
     if (cached) {
       return cached;
     }
-    const targetCommand = await resolveAcpxAgentCommand({
+    let resolvedCommand = await resolveAcpxAgentCommand({
       acpxCommand: this.config.command,
       cwd: params.cwd,
       agent: params.agent,
       spawnOptions: this.spawnCommandOptions,
     });
-    const resolved = buildMcpProxyAgentCommand({
-      targetCommand,
-      mcpServers: toAcpMcpServers(this.config.mcpServers),
-    });
-    this.mcpProxyAgentCommandCache.set(cacheKey, resolved);
-    return resolved;
+    if (wantsCodexBootstrap && params.codexBootstrap) {
+      resolvedCommand = buildCodexBootstrapAgentCommand({
+        targetCommand: resolvedCommand,
+        bootstrap: params.codexBootstrap,
+      });
+    }
+    if (wantsMcpProxy) {
+      resolvedCommand = buildMcpProxyAgentCommand({
+        targetCommand: resolvedCommand,
+        mcpServers: toAcpMcpServers(this.config.mcpServers),
+      });
+    }
+    this.agentCommandCache.set(cacheKey, resolvedCommand);
+    return resolvedCommand;
   }
 
   private async runControlCommand(params: {
