@@ -67,6 +67,17 @@ import {
 } from "./runtime-options.js";
 import { SessionActorQueue } from "./session-actor-queue.js";
 
+const ACPX_CODEX_BOOTSTRAP_ENV_KEY = "OPENCLAW_ACPX_CODEX_BOOTSTRAP";
+
+function hasCodexBootstrapEnv(env?: Record<string, string>): boolean {
+  return Boolean(env?.[ACPX_CODEX_BOOTSTRAP_ENV_KEY]);
+}
+
+function formatAcpManagerLogValue(value: string | undefined): string {
+  const trimmed = value?.trim();
+  return trimmed || "-";
+}
+
 export class AcpSessionManager {
   private readonly actorQueue = new SessionActorQueue();
   private readonly actorTailBySession = this.actorQueue.getTailMapForTesting();
@@ -226,6 +237,17 @@ export class AcpSessionManager {
         cfg: input.cfg,
         sessionKey,
       });
+      logVerbose(
+        [
+          "acp-manager: initializeSession forwarding env",
+          `sessionKey=${sessionKey}`,
+          `backend=${backend.id}`,
+          `agent=${agent}`,
+          `mode=${input.mode}`,
+          `cwd=${formatAcpManagerLogValue(requestedCwd)}`,
+          `hasCodexBootstrapEnv=${hasCodexBootstrapEnv(input.env)}`,
+        ].join(" "),
+      );
       const handle = await withAcpRuntimeErrorBoundary({
         run: async () =>
           await runtime.ensureSession({
@@ -238,6 +260,17 @@ export class AcpSessionManager {
         fallbackCode: "ACP_SESSION_INIT_FAILED",
         fallbackMessage: "Could not initialize ACP session runtime.",
       });
+      logVerbose(
+        [
+          "acp-manager: initializeSession runtime handle created",
+          `sessionKey=${sessionKey}`,
+          `backend=${handle.backend || backend.id}`,
+          `runtimeSessionName=${formatAcpManagerLogValue(handle.runtimeSessionName)}`,
+          `backendSessionId=${formatAcpManagerLogValue(handle.backendSessionId)}`,
+          `agentSessionId=${formatAcpManagerLogValue(handle.agentSessionId)}`,
+          `cwd=${formatAcpManagerLogValue(handle.cwd ?? requestedCwd)}`,
+        ].join(" "),
+      );
       const effectiveCwd = normalizeText(handle.cwd) ?? requestedCwd;
       const effectiveRuntimeOptions = normalizeRuntimeOptions({
         ...initialRuntimeOptions,
@@ -971,12 +1004,39 @@ export class AcpSessionManager {
       const modeMatches = cached.mode === mode;
       const cwdMatches = (cached.cwd ?? "") === (cwd ?? "");
       if (backendMatches && agentMatches && modeMatches && cwdMatches) {
+        logVerbose(
+          [
+            "acp-manager: reusing cached runtime handle",
+            `sessionKey=${params.sessionKey}`,
+            `backend=${cached.backend}`,
+            `agent=${cached.agent}`,
+            `mode=${cached.mode}`,
+            `cwd=${formatAcpManagerLogValue(cached.cwd)}`,
+            `runtimeSessionName=${formatAcpManagerLogValue(cached.handle.runtimeSessionName)}`,
+            `backendSessionId=${formatAcpManagerLogValue(cached.handle.backendSessionId)}`,
+            `agentSessionId=${formatAcpManagerLogValue(cached.handle.agentSessionId)}`,
+          ].join(" "),
+        );
         return {
           runtime: cached.runtime,
           handle: cached.handle,
           meta: params.meta,
         };
       }
+      logVerbose(
+        [
+          "acp-manager: cached runtime handle mismatch",
+          `sessionKey=${params.sessionKey}`,
+          `configuredBackend=${formatAcpManagerLogValue(configuredBackend)}`,
+          `cachedBackend=${cached.backend}`,
+          `agent=${agent}`,
+          `cachedAgent=${cached.agent}`,
+          `mode=${mode}`,
+          `cachedMode=${cached.mode}`,
+          `cwd=${formatAcpManagerLogValue(cwd)}`,
+          `cachedCwd=${formatAcpManagerLogValue(cached.cwd)}`,
+        ].join(" "),
+      );
       this.clearCachedRuntimeState(params.sessionKey);
     }
 
@@ -987,6 +1047,16 @@ export class AcpSessionManager {
 
     const backend = this.deps.requireRuntimeBackend(configuredBackend || undefined);
     const runtime = backend.runtime;
+    logVerbose(
+      [
+        "acp-manager: ensureRuntimeHandle refreshing runtime",
+        `sessionKey=${params.sessionKey}`,
+        `backend=${backend.id}`,
+        `agent=${agent}`,
+        `mode=${mode}`,
+        `cwd=${formatAcpManagerLogValue(cwd)}`,
+      ].join(" "),
+    );
     const ensured = await withAcpRuntimeErrorBoundary({
       run: async () =>
         await runtime.ensureSession({
@@ -998,6 +1068,17 @@ export class AcpSessionManager {
       fallbackCode: "ACP_SESSION_INIT_FAILED",
       fallbackMessage: "Could not initialize ACP session runtime.",
     });
+    logVerbose(
+      [
+        "acp-manager: ensureRuntimeHandle runtime handle refreshed",
+        `sessionKey=${params.sessionKey}`,
+        `backend=${ensured.backend || backend.id}`,
+        `runtimeSessionName=${formatAcpManagerLogValue(ensured.runtimeSessionName)}`,
+        `backendSessionId=${formatAcpManagerLogValue(ensured.backendSessionId)}`,
+        `agentSessionId=${formatAcpManagerLogValue(ensured.agentSessionId)}`,
+        `cwd=${formatAcpManagerLogValue(ensured.cwd ?? cwd)}`,
+      ].join(" "),
+    );
 
     const previousMeta = params.meta;
     const previousIdentity = resolveSessionIdentityFromMeta(previousMeta);

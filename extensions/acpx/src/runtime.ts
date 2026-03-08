@@ -22,7 +22,7 @@ import {
 } from "./runtime-internals/events.js";
 import {
   buildMcpProxyAgentCommand,
-  resolveAcpxAgentCommand,
+  resolveAcpxAgentCommandWithSource,
 } from "./runtime-internals/mcp-agent-command.js";
 import {
   resolveSpawnFailure,
@@ -50,9 +50,37 @@ const ACPX_RUNTIME_HANDLE_PREFIX = "acpx:v1:";
 const DEFAULT_AGENT_FALLBACK = "codex";
 const ACPX_EXIT_CODE_PERMISSION_DENIED = 5;
 const ACPX_CODEX_BOOTSTRAP_ENV_KEY = "OPENCLAW_ACPX_CODEX_BOOTSTRAP";
+const ACPX_CODEX_BOOTSTRAP_WRAPPER_PATH_HINT = "codex-bootstrap-wrapper.mjs";
+const ACPX_MCP_PROXY_PATH_HINT = "mcp-proxy.mjs";
 const ACPX_CAPABILITIES: AcpRuntimeCapabilities = {
   controls: ["session/set_mode", "session/set_config_option", "session/status"],
 };
+
+type DecodedCodexBootstrapEnv = {
+  present: boolean;
+  decoded: boolean;
+  state?: AcpxCodexBootstrapState;
+};
+
+type CachedAgentCommandDetails = {
+  rawAgentCommand: string;
+  source: "config-override" | "builtin-fallback" | "agent-id";
+  targetCommand: string;
+  wrapper: "none" | "codex-bootstrap" | "mcp-proxy" | "codex-bootstrap+mcp-proxy";
+};
+
+type ResolvedAgentCommandDetails =
+  | ({
+      rawAgentCommand: string;
+      cacheHit: boolean;
+    } & CachedAgentCommandDetails)
+  | {
+      rawAgentCommand: null;
+      cacheHit: false;
+      source: "direct-agent";
+      targetCommand?: undefined;
+      wrapper: "none";
+    };
 
 function formatPermissionModeGuidance(): string {
   return "Configure plugins.entries.acpx.config.permissionMode to one of: approve-reads, approve-all, deny-all.";
@@ -137,18 +165,27 @@ function parseCodexBootstrapState(value: unknown): AcpxCodexBootstrapState | und
   };
 }
 
-function decodeCodexBootstrapEnv(
-  env?: Record<string, string>,
-): AcpxCodexBootstrapState | undefined {
+function decodeCodexBootstrapEnvDetailed(env?: Record<string, string>): DecodedCodexBootstrapEnv {
   const encoded = env?.[ACPX_CODEX_BOOTSTRAP_ENV_KEY];
   if (!encoded) {
-    return undefined;
+    return {
+      present: false,
+      decoded: false,
+    };
   }
   try {
     const parsed = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as unknown;
-    return parseCodexBootstrapState(parsed);
+    const state = parseCodexBootstrapState(parsed);
+    return {
+      present: true,
+      decoded: Boolean(state),
+      ...(state ? { state } : {}),
+    };
   } catch {
-    return undefined;
+    return {
+      present: true,
+      decoded: false,
+    };
   }
 }
 
@@ -157,7 +194,7 @@ export class AcpxRuntime implements AcpRuntime {
   private readonly logger?: PluginLogger;
   private readonly queueOwnerTtlSeconds: number;
   private readonly spawnCommandCache: SpawnCommandCache = {};
-  private readonly agentCommandCache = new Map<string, string>();
+  private readonly agentCommandCache = new Map<string, CachedAgentCommandDetails>();
   private readonly spawnCommandOptions: SpawnCommandOptions;
   private readonly loggedSpawnResolutions = new Set<string>();
 
@@ -187,6 +224,84 @@ export class AcpxRuntime implements AcpRuntime {
 
   isHealthy(): boolean {
     return this.healthy;
+  }
+
+  private debug(message: string): void {
+    this.logger?.debug?.(message);
+  }
+
+  private formatDiagnosticValue(value: string | undefined | null): string {
+    const trimmed = typeof value === "string" ? value.trim() : "";
+    return trimmed || "-";
+  }
+
+  private summarizeCodexBootstrap(state?: AcpxCodexBootstrapState): string {
+    return [
+      `model=${this.formatDiagnosticValue(state?.model)}`,
+      `reasoning=${this.formatDiagnosticValue(state?.reasoningEffort)}`,
+    ].join(" ");
+  }
+
+  private summarizeCommandLine(value: string | undefined): string {
+    const text = (value ?? "").replace(/\s+/g, " ").trim();
+    if (!text) {
+      return "-";
+    }
+    return text.length > 220 ? `${text.slice(0, 217)}...` : text;
+  }
+
+  private summarizeStatusDetails(detail: AcpxJsonObject | undefined): string {
+    if (!detail) {
+      return "-";
+    }
+    const summary: Record<string, unknown> = {};
+    for (const key of [
+      "status",
+      "pid",
+      "reason",
+      "message",
+      "runtimeDetails",
+      "acpxRecordId",
+      "acpxSessionId",
+      "agentSessionId",
+    ]) {
+      if (detail[key] !== undefined) {
+        summary[key] = detail[key];
+      }
+    }
+    try {
+      const serialized = JSON.stringify(summary);
+      return serialized.length > 300 ? `${serialized.slice(0, 297)}...` : serialized;
+    } catch {
+      return "[unserializable-status-detail]";
+    }
+  }
+
+  private logVerbRouting(params: {
+    verb: string;
+    agent: string;
+    cwd: string;
+    sessionName?: string;
+    codexBootstrap?: AcpxCodexBootstrapState;
+    resolution: ResolvedAgentCommandDetails;
+  }): void {
+    this.debug(
+      [
+        "acpx runtime: verb route",
+        `verb=${params.verb}`,
+        `session=${this.formatDiagnosticValue(params.sessionName)}`,
+        `agent=${params.agent}`,
+        `cwd=${this.formatDiagnosticValue(params.cwd)}`,
+        `wrapper=${params.resolution.wrapper}`,
+        `commandSource=${params.resolution.source}`,
+        `cacheHit=${params.resolution.cacheHit}`,
+        `hasBootstrap=${Boolean(
+          params.codexBootstrap?.model || params.codexBootstrap?.reasoningEffort,
+        )}`,
+        this.summarizeCodexBootstrap(params.codexBootstrap),
+        `targetCommand=${this.summarizeCommandLine(params.resolution.targetCommand)}`,
+      ].join(" "),
+    );
   }
 
   private logSpawnResolution(event: SpawnResolutionEvent): void {
@@ -238,15 +353,39 @@ export class AcpxRuntime implements AcpRuntime {
     }
     const cwd = asTrimmedString(input.cwd) || this.config.cwd;
     const mode = input.mode;
-    const codexBootstrap = agent === "codex" ? decodeCodexBootstrapEnv(input.env) : undefined;
+    const bootstrapDecode =
+      agent === "codex"
+        ? decodeCodexBootstrapEnvDetailed(input.env)
+        : ({ present: false, decoded: false } satisfies DecodedCodexBootstrapEnv);
+    const codexBootstrap = bootstrapDecode.state;
+    if (bootstrapDecode.present && !bootstrapDecode.decoded) {
+      this.logger?.warn?.(
+        `acpx runtime: Codex bootstrap env present but decode failed sessionKey=${sessionName}`,
+      );
+    }
+    this.debug(
+      [
+        "acpx runtime: ensureSession start",
+        `sessionKey=${sessionName}`,
+        `agent=${agent}`,
+        `mode=${mode}`,
+        `cwd=${this.formatDiagnosticValue(cwd)}`,
+        `bootstrapEnvPresent=${bootstrapDecode.present}`,
+        `bootstrapEnvDecoded=${bootstrapDecode.decoded}`,
+        this.summarizeCodexBootstrap(codexBootstrap),
+      ].join(" "),
+    );
     const ensureCommand = await this.buildVerbArgs({
       agent,
       cwd,
       codexBootstrap,
+      verb: "sessions.ensure",
+      sessionName,
       command: ["sessions", "ensure", "--name", sessionName],
     });
 
     let events = await this.runControlCommand({
+      label: "sessions.ensure",
       args: ensureCommand,
       cwd,
       fallbackCode: "ACP_SESSION_INIT_FAILED",
@@ -259,13 +398,19 @@ export class AcpxRuntime implements AcpRuntime {
     );
 
     if (!ensuredEvent) {
+      this.debug(
+        `acpx runtime: ensureSession missing identifiers after sessions.ensure sessionKey=${sessionName}; retrying sessions.new`,
+      );
       const newCommand = await this.buildVerbArgs({
         agent,
         cwd,
         codexBootstrap,
+        verb: "sessions.new",
+        sessionName,
         command: ["sessions", "new", "--name", sessionName],
       });
       events = await this.runControlCommand({
+        label: "sessions.new",
         args: newCommand,
         cwd,
         fallbackCode: "ACP_SESSION_INIT_FAILED",
@@ -289,6 +434,18 @@ export class AcpxRuntime implements AcpRuntime {
     const backendSessionId = ensuredEvent
       ? asOptionalString(ensuredEvent.acpxSessionId)
       : undefined;
+    this.debug(
+      [
+        "acpx runtime: ensureSession handle-state persisted",
+        `sessionKey=${sessionName}`,
+        `mode=${mode}`,
+        `acpxRecordId=${this.formatDiagnosticValue(acpxRecordId)}`,
+        `backendSessionId=${this.formatDiagnosticValue(backendSessionId)}`,
+        `agentSessionId=${this.formatDiagnosticValue(agentSessionId)}`,
+        `bootstrapPersisted=${Boolean(codexBootstrap)}`,
+        this.summarizeCodexBootstrap(codexBootstrap),
+      ].join(" "),
+    );
 
     return {
       sessionKey: input.sessionKey,
@@ -346,6 +503,16 @@ export class AcpxRuntime implements AcpRuntime {
       },
       this.spawnCommandOptions,
     );
+    this.debug(
+      [
+        "acpx runtime: runTurn spawned",
+        `sessionKey=${input.handle.sessionKey}`,
+        `session=${state.name}`,
+        `agent=${state.agent}`,
+        `pid=${child.pid ?? "unknown"}`,
+        this.summarizeCodexBootstrap(state.codexBootstrap),
+      ].join(" "),
+    );
     child.stdin.on("error", () => {
       // Ignore EPIPE when the child exits before stdin flush completes.
     });
@@ -381,6 +548,9 @@ export class AcpxRuntime implements AcpRuntime {
       const exit = await waitForExit(child);
       if (exit.error) {
         const spawnFailure = resolveSpawnFailure(exit.error, state.cwd);
+        this.debug(
+          `acpx runtime: runTurn exit error session=${state.name} pid=${child.pid ?? "unknown"} error=${exit.error.message}`,
+        );
         if (spawnFailure === "missing-command") {
           this.healthy = false;
           throw new AcpRuntimeError(
@@ -398,6 +568,19 @@ export class AcpxRuntime implements AcpRuntime {
         }
         throw new AcpRuntimeError("ACP_TURN_FAILED", exit.error.message, { cause: exit.error });
       }
+
+      this.debug(
+        [
+          "acpx runtime: runTurn exit",
+          `session=${state.name}`,
+          `pid=${child.pid ?? "unknown"}`,
+          `code=${exit.code ?? "null"}`,
+          `signal=${exit.signal ?? "null"}`,
+          `sawDone=${sawDone}`,
+          `sawError=${sawError}`,
+          `stderr=${this.summarizeCommandLine(stderr)}`,
+        ].join(" "),
+      );
 
       if ((exit.code ?? 0) !== 0 && !sawError) {
         yield {
@@ -434,9 +617,12 @@ export class AcpxRuntime implements AcpRuntime {
       agent: state.agent,
       cwd: state.cwd,
       codexBootstrap: state.codexBootstrap,
+      verb: "status",
+      sessionName: state.name,
       command: ["status", "--session", state.name],
     });
     const events = await this.runControlCommand({
+      label: "status",
       args,
       cwd: state.cwd,
       fallbackCode: "ACP_TURN_FAILED",
@@ -445,6 +631,7 @@ export class AcpxRuntime implements AcpRuntime {
     });
     const detail = events.find((event) => !toAcpxErrorEvent(event)) ?? events[0];
     if (!detail) {
+      this.logger?.warn?.(`acpx runtime: status result unavailable session=${state.name}`);
       return {
         summary: "acpx status unavailable",
       };
@@ -462,6 +649,21 @@ export class AcpxRuntime implements AcpRuntime {
     ]
       .filter(Boolean)
       .join(" ");
+    const statusLog = [
+      "acpx runtime: status result",
+      `session=${state.name}`,
+      `status=${status}`,
+      `pid=${pid ?? "unknown"}`,
+      `acpxRecordId=${this.formatDiagnosticValue(acpxRecordId)}`,
+      `backendSessionId=${this.formatDiagnosticValue(acpxSessionId)}`,
+      `agentSessionId=${this.formatDiagnosticValue(agentSessionId)}`,
+      `details=${this.summarizeStatusDetails(detail)}`,
+    ].join(" ");
+    if (status === "alive") {
+      this.debug(statusLog);
+    } else {
+      this.logger?.warn?.(statusLog);
+    }
     return {
       summary,
       ...(acpxRecordId ? { acpxRecordId } : {}),
@@ -481,9 +683,12 @@ export class AcpxRuntime implements AcpRuntime {
       agent: state.agent,
       cwd: state.cwd,
       codexBootstrap: state.codexBootstrap,
+      verb: "set-mode",
+      sessionName: state.name,
       command: ["set-mode", mode, "--session", state.name],
     });
     await this.runControlCommand({
+      label: "set-mode",
       args,
       cwd: state.cwd,
       fallbackCode: "ACP_TURN_FAILED",
@@ -505,9 +710,12 @@ export class AcpxRuntime implements AcpRuntime {
       agent: state.agent,
       cwd: state.cwd,
       codexBootstrap: state.codexBootstrap,
+      verb: "set",
+      sessionName: state.name,
       command: ["set", key, value, "--session", state.name],
     });
     await this.runControlCommand({
+      label: "set",
       args,
       cwd: state.cwd,
       fallbackCode: "ACP_TURN_FAILED",
@@ -601,9 +809,12 @@ export class AcpxRuntime implements AcpRuntime {
       agent: state.agent,
       cwd: state.cwd,
       codexBootstrap: state.codexBootstrap,
+      verb: "cancel",
+      sessionName: state.name,
       command: ["cancel", "--session", state.name],
     });
     await this.runControlCommand({
+      label: "cancel",
       args,
       cwd: state.cwd,
       fallbackCode: "ACP_TURN_FAILED",
@@ -617,9 +828,12 @@ export class AcpxRuntime implements AcpRuntime {
       agent: state.agent,
       cwd: state.cwd,
       codexBootstrap: state.codexBootstrap,
+      verb: "sessions.close",
+      sessionName: state.name,
       command: ["sessions", "close", state.name],
     });
     await this.runControlCommand({
+      label: "sessions.close",
       args,
       cwd: state.cwd,
       fallbackCode: "ACP_TURN_FAILED",
@@ -630,6 +844,19 @@ export class AcpxRuntime implements AcpRuntime {
   private resolveHandleState(handle: AcpRuntimeHandle): AcpxHandleState {
     const decoded = decodeAcpxRuntimeHandleState(handle.runtimeSessionName);
     if (decoded) {
+      this.debug(
+        [
+          "acpx runtime: handle-state decoded",
+          `sessionKey=${handle.sessionKey}`,
+          `session=${decoded.name}`,
+          `agent=${decoded.agent}`,
+          `mode=${decoded.mode}`,
+          `backendSessionId=${this.formatDiagnosticValue(decoded.backendSessionId)}`,
+          `agentSessionId=${this.formatDiagnosticValue(decoded.agentSessionId)}`,
+          `bootstrapPersisted=${Boolean(decoded.codexBootstrap)}`,
+          this.summarizeCodexBootstrap(decoded.codexBootstrap),
+        ].join(" "),
+      );
       return decoded;
     }
 
@@ -640,6 +867,15 @@ export class AcpxRuntime implements AcpRuntime {
         "Invalid acpx runtime handle: runtimeSessionName is missing.",
       );
     }
+
+    this.debug(
+      [
+        "acpx runtime: handle-state legacy fallback",
+        `sessionKey=${handle.sessionKey}`,
+        `runtimeSessionName=${this.formatDiagnosticValue(legacyName)}`,
+        `agent=${deriveAgentFromSessionKey(handle.sessionKey, DEFAULT_AGENT_FALLBACK)}`,
+      ].join(" "),
+    );
 
     return {
       name: legacyName,
@@ -673,6 +909,8 @@ export class AcpxRuntime implements AcpRuntime {
       agent: params.agent,
       cwd: params.cwd,
       codexBootstrap: params.codexBootstrap,
+      verb: "prompt",
+      sessionName: params.sessionName,
       command: ["prompt", "--session", params.sessionName, "--file", "-"],
       prefix,
     });
@@ -682,32 +920,47 @@ export class AcpxRuntime implements AcpRuntime {
     agent: string;
     cwd: string;
     command: string[];
+    verb: string;
+    sessionName?: string;
     prefix?: string[];
     codexBootstrap?: AcpxCodexBootstrapState;
   }): Promise<string[]> {
     const prefix = params.prefix ?? ["--format", "json", "--json-strict", "--cwd", params.cwd];
-    const agentCommand = await this.resolveRawAgentCommand({
+    const resolution = await this.resolveRawAgentCommandDetails({
       agent: params.agent,
       cwd: params.cwd,
       codexBootstrap: params.codexBootstrap,
     });
-    if (!agentCommand) {
+    this.logVerbRouting({
+      verb: params.verb,
+      agent: params.agent,
+      cwd: params.cwd,
+      sessionName: params.sessionName,
+      codexBootstrap: params.codexBootstrap,
+      resolution,
+    });
+    if (!resolution.rawAgentCommand) {
       return [...prefix, params.agent, ...params.command];
     }
-    return [...prefix, "--agent", agentCommand, ...params.command];
+    return [...prefix, "--agent", resolution.rawAgentCommand, ...params.command];
   }
 
-  private async resolveRawAgentCommand(params: {
+  private async resolveRawAgentCommandDetails(params: {
     agent: string;
     cwd: string;
     codexBootstrap?: AcpxCodexBootstrapState;
-  }): Promise<string | null> {
+  }): Promise<ResolvedAgentCommandDetails> {
     const wantsMcpProxy = Object.keys(this.config.mcpServers).length > 0;
     const wantsCodexBootstrap = Boolean(
       params.codexBootstrap?.model || params.codexBootstrap?.reasoningEffort,
     );
     if (!wantsMcpProxy && !wantsCodexBootstrap) {
-      return null;
+      return {
+        rawAgentCommand: null,
+        cacheHit: false,
+        source: "direct-agent",
+        wrapper: "none",
+      };
     }
     const cacheKey = [
       params.cwd,
@@ -718,37 +971,68 @@ export class AcpxRuntime implements AcpRuntime {
     ].join("::");
     const cached = this.agentCommandCache.get(cacheKey);
     if (cached) {
-      return cached;
+      return {
+        ...cached,
+        cacheHit: true,
+      };
     }
-    let resolvedCommand = await resolveAcpxAgentCommand({
+    const resolvedTarget = await resolveAcpxAgentCommandWithSource({
       acpxCommand: this.config.command,
       cwd: params.cwd,
       agent: params.agent,
       spawnOptions: this.spawnCommandOptions,
     });
+    let resolvedCommand = resolvedTarget.command;
+    let wrapper: CachedAgentCommandDetails["wrapper"] = "none";
     if (wantsCodexBootstrap && params.codexBootstrap) {
       resolvedCommand = buildCodexBootstrapAgentCommand({
         targetCommand: resolvedCommand,
         bootstrap: params.codexBootstrap,
       });
+      wrapper = resolvedCommand.includes(ACPX_CODEX_BOOTSTRAP_WRAPPER_PATH_HINT)
+        ? "codex-bootstrap"
+        : "none";
     }
     if (wantsMcpProxy) {
       resolvedCommand = buildMcpProxyAgentCommand({
         targetCommand: resolvedCommand,
         mcpServers: toAcpMcpServers(this.config.mcpServers),
       });
+      wrapper = resolvedCommand.includes(ACPX_MCP_PROXY_PATH_HINT)
+        ? wrapper === "codex-bootstrap"
+          ? "codex-bootstrap+mcp-proxy"
+          : "mcp-proxy"
+        : wrapper;
     }
-    this.agentCommandCache.set(cacheKey, resolvedCommand);
-    return resolvedCommand;
+    const details: CachedAgentCommandDetails = {
+      rawAgentCommand: resolvedCommand,
+      source: resolvedTarget.source,
+      targetCommand: resolvedTarget.command,
+      wrapper,
+    };
+    this.agentCommandCache.set(cacheKey, details);
+    return {
+      ...details,
+      cacheHit: false,
+    };
   }
 
   private async runControlCommand(params: {
+    label: string;
     args: string[];
     cwd: string;
     fallbackCode: AcpRuntimeErrorCode;
     ignoreNoSession?: boolean;
     signal?: AbortSignal;
   }): Promise<AcpxJsonObject[]> {
+    this.debug(
+      [
+        "acpx runtime: control spawn",
+        `label=${params.label}`,
+        `cwd=${this.formatDiagnosticValue(params.cwd)}`,
+        `argv=${this.summarizeCommandLine(params.args.join(" "))}`,
+      ].join(" "),
+    );
     const result = await spawnAndCollect(
       {
         command: this.config.command,
@@ -763,6 +1047,9 @@ export class AcpxRuntime implements AcpRuntime {
 
     if (result.error) {
       const spawnFailure = resolveSpawnFailure(result.error, params.cwd);
+      this.debug(
+        `acpx runtime: control spawn error label=${params.label} error=${result.error.message}`,
+      );
       if (spawnFailure === "missing-command") {
         this.healthy = false;
         throw new AcpRuntimeError(
@@ -782,8 +1069,26 @@ export class AcpxRuntime implements AcpRuntime {
     }
 
     const events = parseJsonLines(result.stdout);
+    this.debug(
+      [
+        "acpx runtime: control completed",
+        `label=${params.label}`,
+        `code=${result.code ?? "null"}`,
+        `eventCount=${events.length}`,
+        `stderr=${this.summarizeCommandLine(result.stderr)}`,
+      ].join(" "),
+    );
     const errorEvent = events.map((event) => toAcpxErrorEvent(event)).find(Boolean) ?? null;
     if (errorEvent) {
+      this.debug(
+        [
+          "acpx runtime: control error event",
+          `label=${params.label}`,
+          `code=${this.formatDiagnosticValue(errorEvent.code)}`,
+          `message=${this.summarizeCommandLine(errorEvent.message)}`,
+          `ignoreNoSession=${params.ignoreNoSession === true}`,
+        ].join(" "),
+      );
       if (params.ignoreNoSession && errorEvent.code === "NO_SESSION") {
         return events;
       }
@@ -794,6 +1099,14 @@ export class AcpxRuntime implements AcpRuntime {
     }
 
     if ((result.code ?? 0) !== 0) {
+      this.debug(
+        [
+          "acpx runtime: control nonzero exit",
+          `label=${params.label}`,
+          `code=${result.code ?? "null"}`,
+          `stderr=${this.summarizeCommandLine(result.stderr)}`,
+        ].join(" "),
+      );
       throw new AcpRuntimeError(
         params.fallbackCode,
         formatAcpxExitMessage({

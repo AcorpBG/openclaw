@@ -376,7 +376,16 @@ describe("AcpxRuntime", () => {
   });
 
   it("routes Codex ACP spawns through a dedicated bootstrap wrapper and reuses it for later verbs", async () => {
-    const { runtime, logPath } = await createMockRuntimeFixture();
+    const { config, logPath } = await createMockRuntimeFixture();
+    const debugLogs: string[] = [];
+    const runtime = new AcpxRuntime(config, {
+      logger: {
+        ...NOOP_LOGGER,
+        debug: (message: string) => {
+          debugLogs.push(message);
+        },
+      },
+    });
     const handle = await runtime.ensureSession({
       sessionKey: "agent:codex:acp:codex-bootstrap",
       agent: "codex",
@@ -422,6 +431,28 @@ describe("AcpxRuntime", () => {
         reasoningEffort: "high",
       });
     }
+    expect(
+      debugLogs.some((entry) =>
+        entry.includes(
+          "acpx runtime: ensureSession start sessionKey=agent:codex:acp:codex-bootstrap",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      debugLogs.some(
+        (entry) =>
+          entry.includes("acpx runtime: verb route verb=sessions.ensure") &&
+          entry.includes("wrapper=codex-bootstrap") &&
+          entry.includes("commandSource=builtin-fallback"),
+      ),
+    ).toBe(true);
+    expect(
+      debugLogs.some(
+        (entry) =>
+          entry.includes("acpx runtime: ensureSession handle-state persisted") &&
+          entry.includes("bootstrapPersisted=true"),
+      ),
+    ).toBe(true);
   });
 
   it("skips prompt execution when runTurn starts with an already-aborted signal", async () => {

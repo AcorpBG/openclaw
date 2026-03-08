@@ -25,6 +25,7 @@ import {
 import { loadConfig } from "../config/config.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { callGateway } from "../gateway/call.js";
+import { logVerbose } from "../globals.js";
 import { resolveConversationIdFromTargets } from "../infra/outbound/conversation-id.js";
 import {
   getSessionBindingService,
@@ -267,6 +268,15 @@ function normalizeSpawnModelOverride(value: string | undefined): string | undefi
   return trimmed || undefined;
 }
 
+function formatDiagnosticValue(value: string | undefined): string {
+  const trimmed = value?.trim();
+  return trimmed || "-";
+}
+
+function logAcpSpawnDiagnostic(message: string): void {
+  logVerbose(`acp-spawn: ${message}`);
+}
+
 function normalizeCodexReasoningEffort(
   value: string | undefined,
 ): { ok: true; reasoningEffort?: string } | { ok: false; error: string } {
@@ -315,14 +325,36 @@ function resolveAcpSpawnBootstrapEnv(params: {
   agentId: string;
   model?: string;
   thinking?: string;
-}): { ok: true; env?: Record<string, string> } | { ok: false; error: string } {
+}):
+  | {
+      ok: true;
+      env?: Record<string, string>;
+      normalizedModel?: string;
+      normalizedReasoningEffort?: string;
+      bootstrapEnvCreated: boolean;
+    }
+  | {
+      ok: false;
+      error: string;
+      normalizedModel?: string;
+      normalizedReasoningEffort?: string;
+    } {
   const model = normalizeSpawnModelOverride(params.model);
   const reasoningResult = normalizeCodexReasoningEffort(params.thinking);
   if (!reasoningResult.ok) {
-    return reasoningResult;
+    return {
+      ok: false,
+      error: reasoningResult.error,
+      normalizedModel: model,
+    };
   }
   if (!model && !reasoningResult.reasoningEffort) {
-    return { ok: true };
+    return {
+      ok: true,
+      normalizedModel: model,
+      normalizedReasoningEffort: reasoningResult.reasoningEffort,
+      bootstrapEnvCreated: false,
+    };
   }
   const backendId = normalizeOptionalBackendId(params.backendId) ?? "acpx";
   if (backendId !== "acpx" || params.agentId !== "codex") {
@@ -330,14 +362,20 @@ function resolveAcpSpawnBootstrapEnv(params: {
       ok: false,
       error:
         'ACP spawn model/thinking overrides are currently supported only for agentId="codex" on the acpx backend.',
+      normalizedModel: model,
+      normalizedReasoningEffort: reasoningResult.reasoningEffort,
     };
   }
+  const env = buildCodexAcpxBootstrapEnv({
+    model,
+    reasoningEffort: reasoningResult.reasoningEffort,
+  });
   return {
     ok: true,
-    env: buildCodexAcpxBootstrapEnv({
-      model,
-      reasoningEffort: reasoningResult.reasoningEffort,
-    }),
+    env,
+    normalizedModel: model,
+    normalizedReasoningEffort: reasoningResult.reasoningEffort,
+    bootstrapEnvCreated: Boolean(env?.[ACPX_CODEX_BOOTSTRAP_ENV_KEY]),
   };
 }
 
@@ -346,6 +384,18 @@ export async function spawnAcpDirect(
   ctx: SpawnAcpContext,
 ): Promise<SpawnAcpResult> {
   const cfg = loadConfig();
+  logAcpSpawnDiagnostic(
+    [
+      "sessions_spawn request",
+      `requestedAgent=${formatDiagnosticValue(params.agentId)}`,
+      `requestedMode=${formatDiagnosticValue(params.mode)}`,
+      `thread=${params.thread === true}`,
+      `requestedModel=${formatDiagnosticValue(params.model)}`,
+      `requestedThinking=${formatDiagnosticValue(params.thinking)}`,
+      `cwd=${formatDiagnosticValue(params.cwd)}`,
+      `backend=${formatDiagnosticValue(cfg.acp?.backend)}`,
+    ].join(" "),
+  );
   if (!isAcpEnabledByPolicy(cfg)) {
     return {
       status: "forbidden",
@@ -409,7 +459,33 @@ export async function spawnAcpDirect(
     model: params.model,
     thinking: params.thinking,
   });
+  logAcpSpawnDiagnostic(
+    [
+      "override normalization",
+      `agent=${targetAgentId}`,
+      `spawnMode=${spawnMode}`,
+      `thread=${requestThreadBinding}`,
+      `requestedModel=${formatDiagnosticValue(params.model)}`,
+      `requestedThinking=${formatDiagnosticValue(params.thinking)}`,
+      `normalizedModel=${formatDiagnosticValue(bootstrapEnv.normalizedModel)}`,
+      `normalizedReasoning=${formatDiagnosticValue(bootstrapEnv.normalizedReasoningEffort)}`,
+      `bootstrapEnvCreated=${bootstrapEnv.ok ? bootstrapEnv.bootstrapEnvCreated : false}`,
+      `backend=${formatDiagnosticValue(cfg.acp?.backend)}`,
+    ].join(" "),
+  );
   if (!bootstrapEnv.ok) {
+    logAcpSpawnDiagnostic(
+      [
+        "override rejection",
+        `agent=${targetAgentId}`,
+        `backend=${formatDiagnosticValue(cfg.acp?.backend)}`,
+        `requestedModel=${formatDiagnosticValue(params.model)}`,
+        `requestedThinking=${formatDiagnosticValue(params.thinking)}`,
+        `normalizedModel=${formatDiagnosticValue(bootstrapEnv.normalizedModel)}`,
+        `normalizedReasoning=${formatDiagnosticValue(bootstrapEnv.normalizedReasoningEffort)}`,
+        `reason=${bootstrapEnv.error}`,
+      ].join(" "),
+    );
     return {
       status: "error",
       error: bootstrapEnv.error,
@@ -452,6 +528,18 @@ export async function spawnAcpDirect(
       timeoutMs: 10_000,
     });
     sessionCreated = true;
+    logAcpSpawnDiagnostic(
+      [
+        "initialize runtime",
+        `sessionKey=${sessionKey}`,
+        `agent=${targetAgentId}`,
+        `runtimeMode=${runtimeMode}`,
+        `spawnMode=${spawnMode}`,
+        `thread=${requestThreadBinding}`,
+        `cwd=${formatDiagnosticValue(params.cwd)}`,
+        `bootstrapEnvCreated=${bootstrapEnv.bootstrapEnvCreated}`,
+      ].join(" "),
+    );
     const initialized = await acpManager.initializeSession({
       cfg,
       sessionKey,
@@ -465,6 +553,16 @@ export async function spawnAcpDirect(
       runtime: initialized.runtime,
       handle: initialized.handle,
     };
+    logAcpSpawnDiagnostic(
+      [
+        "initialize runtime success",
+        `sessionKey=${sessionKey}`,
+        `runtimeSessionName=${formatDiagnosticValue(initialized.handle.runtimeSessionName)}`,
+        `backendSessionId=${formatDiagnosticValue(initialized.handle.backendSessionId)}`,
+        `agentSessionId=${formatDiagnosticValue(initialized.handle.agentSessionId)}`,
+        `bootstrapEnvCreated=${bootstrapEnv.bootstrapEnvCreated}`,
+      ].join(" "),
+    );
 
     if (preparedBinding) {
       binding = await bindingService.bind({
@@ -512,6 +610,14 @@ export async function spawnAcpDirect(
       }
     }
   } catch (err) {
+    logAcpSpawnDiagnostic(
+      [
+        "spawn initialization failed",
+        `sessionKey=${sessionKey}`,
+        `agent=${targetAgentId}`,
+        `reason=${summarizeError(err)}`,
+      ].join(" "),
+    );
     await cleanupFailedAcpSpawn({
       cfg,
       sessionKey,
@@ -585,8 +691,26 @@ export async function spawnAcpDirect(
     if (typeof response?.runId === "string" && response.runId.trim()) {
       childRunId = response.runId.trim();
     }
+    logAcpSpawnDiagnostic(
+      [
+        "initial task dispatched",
+        `sessionKey=${sessionKey}`,
+        `runId=${childRunId}`,
+        `spawnMode=${spawnMode}`,
+        `inlineDelivery=${useInlineDelivery}`,
+        `streamToParent=${streamToParentRequested}`,
+        `deliveryThreadId=${formatDiagnosticValue(deliveryThreadId)}`,
+      ].join(" "),
+    );
   } catch (err) {
     parentRelay?.dispose();
+    logAcpSpawnDiagnostic(
+      [
+        "initial task dispatch failed",
+        `sessionKey=${sessionKey}`,
+        `reason=${summarizeError(err)}`,
+      ].join(" "),
+    );
     await cleanupFailedAcpSpawn({
       cfg,
       sessionKey,

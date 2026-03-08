@@ -2,6 +2,16 @@
 
 import { spawn } from "node:child_process";
 
+const LOG_PREFIX = "[acpx-codex-wrapper]";
+
+function log(message) {
+  try {
+    process.stderr.write(`${LOG_PREFIX} ${message}\n`);
+  } catch {
+    // Best-effort diagnostics only.
+  }
+}
+
 function splitCommandLine(value) {
   const parts = [];
   let current = "";
@@ -102,32 +112,88 @@ function buildCliOverrides(params) {
   return args;
 }
 
+function quoteCommandPart(value) {
+  if (value === "") {
+    return '""';
+  }
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) {
+    return value;
+  }
+  return `"${value.replace(/["\\]/g, "\\$&")}"`;
+}
+
+function formatCommandLine(command, args) {
+  return [command, ...args].map(quoteCommandPart).join(" ");
+}
+
 const payload = decodePayload(process.argv.slice(2));
 const target = splitCommandLine(payload.targetCommand);
-const child = spawn(target.command, [...target.args, ...buildCliOverrides(payload)], {
+const cliOverrides = buildCliOverrides(payload);
+log(
+  `decoded payload targetCommand=${formatCommandLine(target.command, target.args)} model=${payload.model || "-"} reasoning=${payload.reasoningEffort || "-"} overrides=${JSON.stringify(cliOverrides)}`,
+);
+const childArgs = [...target.args, ...cliOverrides];
+const child = spawn(target.command, childArgs, {
   stdio: ["pipe", "pipe", "inherit"],
   env: process.env,
 });
+log(
+  `spawn child command=${formatCommandLine(target.command, childArgs)} pid=${child.pid ?? "unknown"}`,
+);
 
 if (!child.stdin || !child.stdout) {
   throw new Error("Failed to create Codex bootstrap wrapper stdio pipes");
 }
 
+log("pipe stdin->child.stdin start");
+process.stdin.on("end", () => {
+  log("parent stdin end");
+});
+process.stdin.on("close", () => {
+  log("parent stdin close");
+});
+process.stdin.on("error", (error) => {
+  log(`parent stdin error=${error instanceof Error ? error.message : String(error)}`);
+});
 process.stdin.pipe(child.stdin);
 child.stdin.on("error", () => {
   // Ignore EPIPE when the child exits before stdin flush completes.
+  log("child stdin error=EPIPE-or-exit-race");
 });
+child.stdin.on("close", () => {
+  log("child stdin close");
+});
+log("pipe child.stdout->stdout start");
 child.stdout.pipe(process.stdout);
+child.stdout.on("end", () => {
+  log("child stdout end");
+});
+child.stdout.on("close", () => {
+  log("child stdout close");
+});
+child.stdout.on("error", (error) => {
+  log(`child stdout error=${error instanceof Error ? error.message : String(error)}`);
+});
 
 child.on("error", (error) => {
+  log(`child error=${error instanceof Error ? error.message : String(error)}`);
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exit(1);
 });
 
+child.on("exit", (code, signal) => {
+  log(`child exit code=${code ?? "null"} signal=${signal ?? "null"}`);
+});
+
 child.on("close", (code, signal) => {
+  log(`child close code=${code ?? "null"} signal=${signal ?? "null"}`);
   if (signal) {
     process.kill(process.pid, signal);
     return;
   }
   process.exit(code ?? 0);
+});
+
+process.on("exit", (code) => {
+  log(`wrapper exit code=${code}`);
 });
