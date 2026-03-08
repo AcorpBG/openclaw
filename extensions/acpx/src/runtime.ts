@@ -261,37 +261,11 @@ export class AcpxRuntime implements AcpRuntime {
     });
     const cwd = asTrimmedString(input.cwd) || previousHandleState?.cwd || this.config.cwd;
     const mode = input.mode;
-    const envPresent = input.env != null;
     const bootstrapKeyPresent = Boolean(input.env?.[ACPX_CODEX_BOOTSTRAP_ENV_KEY]);
     const envCodexBootstrap = agent === "codex" ? decodeCodexBootstrapEnv(input.env) : undefined;
     const restoredCodexBootstrap =
       !bootstrapKeyPresent && agent === "codex" ? previousHandleState?.codexBootstrap : undefined;
     const codexBootstrap = bootstrapKeyPresent ? envCodexBootstrap : restoredCodexBootstrap;
-    const bootstrapSource = bootstrapKeyPresent
-      ? "env"
-      : restoredCodexBootstrap
-        ? "handle"
-        : "empty";
-    const bootstrapState = bootstrapKeyPresent
-      ? envCodexBootstrap
-        ? "success"
-        : "failed"
-      : restoredCodexBootstrap
-        ? "restored"
-        : "empty";
-    this.logger?.debug?.(
-      [
-        "acpx runtime: ensureSession bootstrap decode",
-        `sessionKey=${sessionName}`,
-        `agent=${agent}`,
-        `envPresent=${envPresent}`,
-        `bootstrapKeyPresent=${bootstrapKeyPresent}`,
-        `bootstrapSource=${bootstrapSource}`,
-        `bootstrapState=${bootstrapState}`,
-        `model=${codexBootstrap?.model?.trim() || "-"}`,
-        `reasoning=${codexBootstrap?.reasoningEffort?.trim() || "-"}`,
-      ].join(" "),
-    );
     const ensureCommand = await this.buildVerbArgs({
       agent,
       cwd,
