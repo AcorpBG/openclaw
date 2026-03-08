@@ -425,7 +425,7 @@ describe("spawnAcpDirect", () => {
     });
   });
 
-  it("rejects ACP model and thinking overrides for unsupported agent/backend tuples", async () => {
+  it("accepts ACP spawns and strips unsupported model/thinking overrides for other harnesses", async () => {
     hoisted.state.cfg = {
       ...hoisted.state.cfg,
       acp: {
@@ -440,15 +440,50 @@ describe("spawnAcpDirect", () => {
         task: "hello",
         agentId: "claude",
         model: "claude-opus-4-5",
+        thinking: "medium",
       },
       {
         agentSessionKey: "agent:main:main",
       },
     );
 
-    expect(result.status).toBe("error");
-    expect(result.error).toContain('supported only for agentId="codex" on the acpx backend');
-    expect(hoisted.initializeSessionMock).not.toHaveBeenCalled();
+    expect(result.status).toBe("accepted");
+    expect(result.note).toContain('supported only for agentId="codex" on the acpx backend');
+    const initCall = hoisted.initializeSessionMock.mock.calls[0]?.[0];
+    expect(initCall).toMatchObject({
+      agent: "claude",
+    });
+    expect(decodeCodexBootstrapEnv(initCall)).toBeUndefined();
+  });
+
+  it("ignores invalid thinking overrides for non-Codex ACP harnesses", async () => {
+    hoisted.state.cfg = {
+      ...hoisted.state.cfg,
+      acp: {
+        enabled: true,
+        backend: "acpx",
+        allowedAgents: ["codex", "claude"],
+      },
+    };
+
+    const result = await spawnAcpDirect(
+      {
+        task: "hello",
+        agentId: "claude",
+        thinking: "adaptive",
+      },
+      {
+        agentSessionKey: "agent:main:main",
+      },
+    );
+
+    expect(result.status).toBe("accepted");
+    expect(result.note).toContain('supported only for agentId="codex" on the acpx backend');
+    const initCall = hoisted.initializeSessionMock.mock.calls[0]?.[0];
+    expect(initCall).toMatchObject({
+      agent: "claude",
+    });
+    expect(decodeCodexBootstrapEnv(initCall)).toBeUndefined();
   });
 
   it("rejects unsupported Codex ACP thinking levels before session init", async () => {

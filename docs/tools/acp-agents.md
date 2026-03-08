@@ -256,6 +256,7 @@ Interface details:
 Current override scope:
 
 - ACP `model` / `thinking` overrides currently apply only to `agentId: "codex"` on the `acpx` backend.
+- For other ACP harnesses, OpenClaw ignores those two fields, continues the spawn, and returns a note explaining that the overrides were skipped.
 - Other ACP harnesses still use their normal backend/runtime defaults or later `/acp` session controls.
 
 ## Sandbox compatibility

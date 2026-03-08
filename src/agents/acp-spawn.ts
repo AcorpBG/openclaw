@@ -310,27 +310,34 @@ function buildCodexAcpxBootstrapEnv(payload: {
   };
 }
 
+function formatUnsupportedAcpSpawnOverrideNote(): string {
+  return 'Ignored ACP model/thinking overrides because they are currently supported only for agentId="codex" on the acpx backend.';
+}
+
 function resolveAcpSpawnBootstrapEnv(params: {
   backendId?: string;
   agentId: string;
   model?: string;
   thinking?: string;
-}): { ok: true; env?: Record<string, string> } | { ok: false; error: string } {
+}): { ok: true; env?: Record<string, string>; note?: string } | { ok: false; error: string } {
   const model = normalizeSpawnModelOverride(params.model);
-  const reasoningResult = normalizeCodexReasoningEffort(params.thinking);
+  const thinking = params.thinking?.trim() || undefined;
+  const backendId = normalizeOptionalBackendId(params.backendId) ?? "acpx";
+  if (backendId !== "acpx" || params.agentId !== "codex") {
+    if (!model && !thinking) {
+      return { ok: true };
+    }
+    return {
+      ok: true,
+      note: formatUnsupportedAcpSpawnOverrideNote(),
+    };
+  }
+  const reasoningResult = normalizeCodexReasoningEffort(thinking);
   if (!reasoningResult.ok) {
     return reasoningResult;
   }
   if (!model && !reasoningResult.reasoningEffort) {
     return { ok: true };
-  }
-  const backendId = normalizeOptionalBackendId(params.backendId) ?? "acpx";
-  if (backendId !== "acpx" || params.agentId !== "codex") {
-    return {
-      ok: false,
-      error:
-        'ACP spawn model/thinking overrides are currently supported only for agentId="codex" on the acpx backend.',
-    };
   }
   return {
     ok: true,
@@ -415,6 +422,7 @@ export async function spawnAcpDirect(
       error: bootstrapEnv.error,
     };
   }
+  const acceptedNotePrefix = bootstrapEnv.note?.trim() || undefined;
 
   const sessionKey = `agent:${targetAgentId}:acp:${crypto.randomUUID()}`;
   const runtimeMode = resolveAcpSessionMode(spawnMode);
@@ -620,7 +628,12 @@ export async function spawnAcpDirect(
       runId: childRunId,
       mode: spawnMode,
       ...(streamLogPath ? { streamLogPath } : {}),
-      note: spawnMode === "session" ? ACP_SPAWN_SESSION_ACCEPTED_NOTE : ACP_SPAWN_ACCEPTED_NOTE,
+      note: [
+        acceptedNotePrefix,
+        spawnMode === "session" ? ACP_SPAWN_SESSION_ACCEPTED_NOTE : ACP_SPAWN_ACCEPTED_NOTE,
+      ]
+        .filter(Boolean)
+        .join(" "),
     };
   }
 
@@ -629,6 +642,11 @@ export async function spawnAcpDirect(
     childSessionKey: sessionKey,
     runId: childRunId,
     mode: spawnMode,
-    note: spawnMode === "session" ? ACP_SPAWN_SESSION_ACCEPTED_NOTE : ACP_SPAWN_ACCEPTED_NOTE,
+    note: [
+      acceptedNotePrefix,
+      spawnMode === "session" ? ACP_SPAWN_SESSION_ACCEPTED_NOTE : ACP_SPAWN_ACCEPTED_NOTE,
+    ]
+      .filter(Boolean)
+      .join(" "),
   };
 }
