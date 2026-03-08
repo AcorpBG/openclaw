@@ -447,6 +447,83 @@ describe("AcpxRuntime", () => {
     }
   });
 
+  it("composes Codex bootstrap and MCP proxy wrappers when both are configured", async () => {
+    process.env.MOCK_ACPX_CONFIG_SHOW_AGENTS = JSON.stringify({
+      codex: {
+        command: "npx custom-codex-acp",
+      },
+    });
+    try {
+      const { runtime, logPath } = await createMockRuntimeFixture({
+        mcpServers: {
+          canva: {
+            command: "npx",
+            args: ["-y", "mcp-remote@latest", "https://mcp.canva.com/mcp"],
+            env: {
+              CANVA_TOKEN: "secret",
+            },
+          },
+        },
+      });
+      const handle = await runtime.ensureSession({
+        sessionKey: "agent:codex:acp:codex-bootstrap-mcp",
+        agent: "codex",
+        mode: "persistent",
+        env: {
+          OPENCLAW_ACPX_CODEX_BOOTSTRAP: Buffer.from(
+            JSON.stringify({
+              model: "gpt-5.3-codex-spark",
+              reasoningEffort: "high",
+            }),
+            "utf8",
+          ).toString("base64url"),
+        },
+      });
+      await runtime.getStatus({ handle });
+
+      const logs = await readMockRuntimeLogEntries(logPath);
+      const ensureArgs = (logs.find((entry) => entry.kind === "ensure")?.args as string[]) ?? [];
+      const statusArgs = (logs.find((entry) => entry.kind === "status")?.args as string[]) ?? [];
+
+      for (const args of [ensureArgs, statusArgs]) {
+        const agentFlagIndex = args.indexOf("--agent");
+        expect(agentFlagIndex).toBeGreaterThanOrEqual(0);
+        const rawAgentCommand = args[agentFlagIndex + 1];
+        expect(rawAgentCommand).toContain("mcp-proxy.mjs");
+        const outerPayloadMatch = rawAgentCommand.match(/--payload\s+([A-Za-z0-9_-]+)/);
+        expect(outerPayloadMatch?.[1]).toBeDefined();
+        const outerPayload = JSON.parse(
+          Buffer.from(String(outerPayloadMatch?.[1]), "base64url").toString("utf8"),
+        ) as {
+          targetCommand: string;
+          mcpServers: Array<{ name: string }>;
+        };
+        expect(outerPayload.mcpServers).toEqual([
+          expect.objectContaining({
+            name: "canva",
+          }),
+        ]);
+        expect(outerPayload.targetCommand).toContain("codex-bootstrap-wrapper.mjs");
+
+        const innerPayloadMatch = outerPayload.targetCommand.match(/--payload\s+([A-Za-z0-9_-]+)/);
+        expect(innerPayloadMatch?.[1]).toBeDefined();
+        const innerPayload = JSON.parse(
+          Buffer.from(String(innerPayloadMatch?.[1]), "base64url").toString("utf8"),
+        ) as {
+          targetCommand: string;
+          bootstrap: { model?: string; reasoningEffort?: string };
+        };
+        expect(innerPayload.targetCommand).toContain("custom-codex-acp");
+        expect(innerPayload.bootstrap).toEqual({
+          model: "gpt-5.3-codex-spark",
+          reasoningEffort: "high",
+        });
+      }
+    } finally {
+      delete process.env.MOCK_ACPX_CONFIG_SHOW_AGENTS;
+    }
+  });
+
   it("reuses Codex bootstrap from the previous handle when re-ensuring without env", async () => {
     const { runtime, logPath } = await createMockRuntimeFixture();
     const firstHandle = await runtime.ensureSession({

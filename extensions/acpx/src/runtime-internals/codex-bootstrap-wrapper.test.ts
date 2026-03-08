@@ -72,4 +72,41 @@ process.stdout.write(JSON.stringify(process.argv.slice(2)) + "\n");
       'model_reasoning_effort="high"',
     ]);
   });
+
+  it("preserves backslashes in quoted executable paths", async () => {
+    const argvPrinterPath = await makeTempScript(
+      String.raw`argv printer\with spaces.cjs`,
+      String.raw`#!/usr/bin/env node
+process.stdout.write(JSON.stringify(process.argv.slice(2)) + "\n");
+`,
+    );
+
+    const payload = Buffer.from(
+      JSON.stringify({
+        targetCommand: `"${argvPrinterPath}" --flag`,
+        bootstrap: {
+          model: "gpt-5.3-codex-spark",
+        },
+      }),
+      "utf8",
+    ).toString("base64url");
+
+    const child = spawn(process.execPath, [wrapperPath, "--payload", payload], {
+      stdio: ["pipe", "pipe", "inherit"],
+      cwd: process.cwd(),
+    });
+    child.stdin.end();
+
+    let stdout = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+
+    const exitCode = await new Promise<number | null>((resolve) => {
+      child.once("close", (code) => resolve(code));
+    });
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout.trim())).toEqual(["--flag", "-c", 'model="gpt-5.3-codex-spark"']);
+  });
 });
