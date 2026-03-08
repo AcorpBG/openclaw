@@ -1,4 +1,5 @@
 import { Type } from "@sinclair/typebox";
+import { logVerbose } from "../../globals.js";
 import type { GatewayMessageChannel } from "../../utils/message-channel.js";
 import { ACP_SPAWN_MODES, ACP_SPAWN_STREAM_TARGETS, spawnAcpDirect } from "../acp-spawn.js";
 import { optionalStringEnum } from "../schema/typebox.js";
@@ -19,6 +20,14 @@ const UNSUPPORTED_SESSIONS_SPAWN_PARAM_KEYS = [
   "replyTo",
   "reply_to",
 ] as const;
+
+function formatSessionsSpawnDiagnosticValue(value: unknown): string {
+  return typeof value === "string" && value.trim() ? value.trim() : "-";
+}
+
+function logSessionsSpawnDiagnostic(message: string): void {
+  logVerbose(`sessions-spawn: ${message}`);
+}
 
 const SessionsSpawnToolSchema = Type.Object({
   task: Type.String(),
@@ -79,10 +88,28 @@ export function createSessionsSpawnTool(
     parameters: SessionsSpawnToolSchema,
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
+      const rawRuntime = params.runtime === "acp" ? "acp" : "subagent";
+      logSessionsSpawnDiagnostic(
+        [
+          "entry",
+          `runtime=${rawRuntime}`,
+          `agentId=${formatSessionsSpawnDiagnosticValue(params.agentId)}`,
+          `mode=${formatSessionsSpawnDiagnosticValue(params.mode)}`,
+          `thread=${params.thread === true}`,
+          `model=${formatSessionsSpawnDiagnosticValue(params.model)}`,
+          `thinking=${formatSessionsSpawnDiagnosticValue(params.thinking)}`,
+          `cwd=${formatSessionsSpawnDiagnosticValue(params.cwd)}`,
+        ].join(" "),
+      );
       const unsupportedParam = UNSUPPORTED_SESSIONS_SPAWN_PARAM_KEYS.find((key) =>
         Object.hasOwn(params, key),
       );
       if (unsupportedParam) {
+        logSessionsSpawnDiagnostic(
+          ["reject unsupported-param", `runtime=${rawRuntime}`, `param=${unsupportedParam}`].join(
+            " ",
+          ),
+        );
         throw new ToolInputError(
           `sessions_spawn does not support "${unsupportedParam}". Use "message" or "sessions_send" for channel delivery.`,
         );
@@ -120,7 +147,30 @@ export function createSessionsSpawnTool(
           }>)
         : undefined;
 
+      logSessionsSpawnDiagnostic(
+        [
+          "normalized",
+          `runtime=${runtime}`,
+          `agentId=${formatSessionsSpawnDiagnosticValue(requestedAgentId)}`,
+          `mode=${formatSessionsSpawnDiagnosticValue(mode)}`,
+          `thread=${thread}`,
+          `model=${formatSessionsSpawnDiagnosticValue(modelOverride)}`,
+          `thinking=${formatSessionsSpawnDiagnosticValue(thinkingOverrideRaw)}`,
+          `cwd=${formatSessionsSpawnDiagnosticValue(cwd)}`,
+          `sandbox=${sandbox}`,
+          `streamTo=${formatSessionsSpawnDiagnosticValue(streamTo)}`,
+          `attachments=${attachments?.length ?? 0}`,
+        ].join(" "),
+      );
+
       if (streamTo && runtime !== "acp") {
+        logSessionsSpawnDiagnostic(
+          [
+            "reject stream-target-runtime-mismatch",
+            `runtime=${runtime}`,
+            `streamTo=${streamTo}`,
+          ].join(" "),
+        );
         return jsonResult({
           status: "error",
           error: `streamTo is only supported for runtime=acp; got runtime=${runtime}`,
@@ -129,12 +179,31 @@ export function createSessionsSpawnTool(
 
       if (runtime === "acp") {
         if (Array.isArray(attachments) && attachments.length > 0) {
+          logSessionsSpawnDiagnostic(
+            [
+              "reject acp-attachments-unsupported",
+              `runtime=${runtime}`,
+              `attachments=${attachments.length}`,
+            ].join(" "),
+          );
           return jsonResult({
             status: "error",
             error:
               "attachments are currently unsupported for runtime=acp; use runtime=subagent or remove attachments",
           });
         }
+        logSessionsSpawnDiagnostic(
+          [
+            "dispatch spawnAcpDirect",
+            `runtime=${runtime}`,
+            `agentId=${formatSessionsSpawnDiagnosticValue(requestedAgentId)}`,
+            `mode=${formatSessionsSpawnDiagnosticValue(mode)}`,
+            `thread=${thread}`,
+            `model=${formatSessionsSpawnDiagnosticValue(modelOverride)}`,
+            `thinking=${formatSessionsSpawnDiagnosticValue(thinkingOverrideRaw)}`,
+            `cwd=${formatSessionsSpawnDiagnosticValue(cwd)}`,
+          ].join(" "),
+        );
         const result = await spawnAcpDirect(
           {
             task,

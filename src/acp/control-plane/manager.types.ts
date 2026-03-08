@@ -46,6 +46,7 @@ export type AcpInitializeSessionInput = {
   cwd?: string;
   env?: Record<string, string>;
   backendId?: string;
+  reason?: string;
 };
 
 export type AcpRunTurnInput = {

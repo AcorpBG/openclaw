@@ -78,6 +78,10 @@ function formatAcpManagerLogValue(value: string | undefined): string {
   return trimmed || "-";
 }
 
+function hasManagerCodexBootstrapEnv(env?: Record<string, string>): boolean {
+  return Boolean(env?.[ACPX_CODEX_BOOTSTRAP_ENV_KEY]);
+}
+
 export class AcpSessionManager {
   private readonly actorQueue = new SessionActorQueue();
   private readonly actorTailBySession = this.actorQueue.getTailMapForTesting();
@@ -192,6 +196,7 @@ export class AcpSessionManager {
             cfg: params.cfg,
             sessionKey: session.sessionKey,
             meta: resolution.meta,
+            reason: "startup-identity-reconcile",
           });
           const reconciled = await this.reconcileRuntimeSessionIdentifiers({
             cfg: params.cfg,
@@ -227,6 +232,21 @@ export class AcpSessionManager {
       throw new AcpRuntimeError("ACP_SESSION_INIT_FAILED", "ACP session key is required.");
     }
     const agent = normalizeAgentId(input.agent);
+    logVerbose(
+      [
+        "acp-manager: runtime path",
+        "path=initializeSession",
+        `reason=${formatAcpManagerLogValue(input.reason)}`,
+        "why=fresh-session-init",
+        `sessionKey=${sessionKey}`,
+        `backend=${formatAcpManagerLogValue(input.backendId || input.cfg.acp?.backend)}`,
+        `agent=${agent}`,
+        `mode=${input.mode}`,
+        `cwd=${formatAcpManagerLogValue(input.cwd)}`,
+        `envPresent=${Boolean(input.env)}`,
+        `hasCodexBootstrapEnv=${hasManagerCodexBootstrapEnv(input.env)}`,
+      ].join(" "),
+    );
     await this.evictIdleRuntimeHandles({ cfg: input.cfg });
     return await this.withSessionActor(sessionKey, async () => {
       const backend = this.deps.requireRuntimeBackend(input.backendId || input.cfg.acp?.backend);
@@ -383,6 +403,7 @@ export class AcpSessionManager {
           cfg: params.cfg,
           sessionKey,
           meta: resolution.meta,
+          reason: "get-session-status",
         });
         let handle = ensuredHandle;
         let meta = ensuredMeta;
@@ -461,6 +482,7 @@ export class AcpSessionManager {
         cfg: params.cfg,
         sessionKey,
         meta: resolution.meta,
+        reason: "set-session-runtime-mode",
       });
       const capabilities = await this.resolveRuntimeCapabilities({ runtime, handle });
       if (!capabilities.controls.includes("session/set_mode") || !runtime.setMode) {
@@ -526,6 +548,7 @@ export class AcpSessionManager {
         cfg: params.cfg,
         sessionKey,
         meta: resolution.meta,
+        reason: "set-session-config-option",
       });
       const inferredPatch = inferRuntimeOptionPatchFromConfigOption(key, value);
       const capabilities = await this.resolveRuntimeCapabilities({ runtime, handle });
@@ -641,6 +664,7 @@ export class AcpSessionManager {
         cfg: params.cfg,
         sessionKey,
         meta: resolution.meta,
+        reason: "reset-session-runtime-options",
       });
       await withAcpRuntimeErrorBoundary({
         run: async () =>
@@ -690,6 +714,7 @@ export class AcpSessionManager {
         cfg: input.cfg,
         sessionKey,
         meta: resolution.meta,
+        reason: "run-turn",
       });
       let handle = ensuredHandle;
       const meta = ensuredMeta;
@@ -857,6 +882,7 @@ export class AcpSessionManager {
         cfg: params.cfg,
         sessionKey,
         meta: resolution.meta,
+        reason: "cancel-session",
       });
       try {
         await withAcpRuntimeErrorBoundary({
@@ -931,6 +957,7 @@ export class AcpSessionManager {
           cfg: input.cfg,
           sessionKey,
           meta: resolution.meta,
+          reason: "close-session",
         });
         await withAcpRuntimeErrorBoundary({
           run: async () =>
@@ -990,6 +1017,7 @@ export class AcpSessionManager {
     cfg: OpenClawConfig;
     sessionKey: string;
     meta: SessionAcpMeta;
+    reason?: string;
   }): Promise<{ runtime: AcpRuntime; handle: AcpRuntimeHandle; meta: SessionAcpMeta }> {
     const agent =
       params.meta.agent?.trim() || resolveAcpAgentFromSessionKey(params.sessionKey, "main");
@@ -998,6 +1026,23 @@ export class AcpSessionManager {
     const cwd = runtimeOptions.cwd ?? normalizeText(params.meta.cwd);
     const configuredBackend = (params.meta.backend || params.cfg.acp?.backend || "").trim();
     const cached = this.getCachedRuntimeState(params.sessionKey);
+    logVerbose(
+      [
+        "acp-manager: runtime path",
+        "path=ensureRuntimeHandle",
+        `reason=${formatAcpManagerLogValue(params.reason)}`,
+        "why=existing-session-runtime-refresh",
+        `sessionKey=${params.sessionKey}`,
+        `backend=${formatAcpManagerLogValue(configuredBackend)}`,
+        `agent=${agent}`,
+        `mode=${mode}`,
+        `cwd=${formatAcpManagerLogValue(cwd)}`,
+        "envPresent=false",
+        "hasCodexBootstrapEnv=false",
+        `cachedHandlePresent=${Boolean(cached)}`,
+        `metaRuntimeSessionName=${formatAcpManagerLogValue(params.meta.runtimeSessionName)}`,
+      ].join(" "),
+    );
     if (cached) {
       const backendMatches = !configuredBackend || cached.backend === configuredBackend;
       const agentMatches = cached.agent === agent;

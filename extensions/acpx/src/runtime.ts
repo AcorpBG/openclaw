@@ -344,6 +344,19 @@ export class AcpxRuntime implements AcpRuntime {
 
   async ensureSession(input: AcpRuntimeEnsureInput): Promise<AcpRuntimeHandle> {
     const sessionName = asTrimmedString(input.sessionKey);
+    const envPresent = input.env != null;
+    const bootstrapKeyPresent = Boolean(input.env?.[ACPX_CODEX_BOOTSTRAP_ENV_KEY]);
+    this.debug(
+      [
+        "acpx runtime: ensureSession entry",
+        `sessionKey=${this.formatDiagnosticValue(sessionName)}`,
+        `agent=${this.formatDiagnosticValue(asOptionalString(input.agent))}`,
+        `mode=${input.mode}`,
+        `cwd=${this.formatDiagnosticValue(asOptionalString(input.cwd) || this.config.cwd)}`,
+        `envPresent=${envPresent}`,
+        `bootstrapKeyPresent=${bootstrapKeyPresent}`,
+      ].join(" "),
+    );
     if (!sessionName) {
       throw new AcpRuntimeError("ACP_SESSION_INIT_FAILED", "ACP session key is required.");
     }
@@ -358,6 +371,17 @@ export class AcpxRuntime implements AcpRuntime {
         ? decodeCodexBootstrapEnvDetailed(input.env)
         : ({ present: false, decoded: false } satisfies DecodedCodexBootstrapEnv);
     const codexBootstrap = bootstrapDecode.state;
+    this.debug(
+      [
+        "acpx runtime: ensureSession bootstrap decode",
+        `sessionKey=${sessionName}`,
+        `agent=${agent}`,
+        `envPresent=${envPresent}`,
+        `bootstrapKeyPresent=${bootstrapKeyPresent}`,
+        `bootstrapState=${!bootstrapDecode.present ? "empty" : bootstrapDecode.decoded ? "success" : "failed"}`,
+        this.summarizeCodexBootstrap(codexBootstrap),
+      ].join(" "),
+    );
     if (bootstrapDecode.present && !bootstrapDecode.decoded) {
       this.logger?.warn?.(
         `acpx runtime: Codex bootstrap env present but decode failed sessionKey=${sessionName}`,
