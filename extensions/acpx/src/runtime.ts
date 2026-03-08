@@ -694,7 +694,18 @@ export class AcpxRuntime implements AcpRuntime {
   private resolveHandleState(handle: AcpRuntimeHandle): AcpxHandleState {
     const decoded = decodeAcpxRuntimeHandleState(handle.runtimeSessionName);
     if (decoded) {
-      return decoded;
+      const effectiveCwd = asTrimmedString(handle.cwd) || decoded.cwd;
+      const acpxRecordId = asOptionalString(handle.acpxRecordId) || decoded.acpxRecordId;
+      const backendSessionId =
+        asOptionalString(handle.backendSessionId) || decoded.backendSessionId;
+      const agentSessionId = asOptionalString(handle.agentSessionId) || decoded.agentSessionId;
+      return {
+        ...decoded,
+        cwd: effectiveCwd,
+        ...(acpxRecordId ? { acpxRecordId } : {}),
+        ...(backendSessionId ? { backendSessionId } : {}),
+        ...(agentSessionId ? { agentSessionId } : {}),
+      };
     }
 
     const legacyName = asTrimmedString(handle.runtimeSessionName);
@@ -705,11 +716,18 @@ export class AcpxRuntime implements AcpRuntime {
       );
     }
 
+    const effectiveCwd = asTrimmedString(handle.cwd) || this.config.cwd;
+    const acpxRecordId = asOptionalString(handle.acpxRecordId);
+    const backendSessionId = asOptionalString(handle.backendSessionId);
+    const agentSessionId = asOptionalString(handle.agentSessionId);
     return {
       name: legacyName,
       agent: deriveAgentFromSessionKey(handle.sessionKey, DEFAULT_AGENT_FALLBACK),
-      cwd: this.config.cwd,
+      cwd: effectiveCwd,
       mode: "persistent",
+      ...(acpxRecordId ? { acpxRecordId } : {}),
+      ...(backendSessionId ? { backendSessionId } : {}),
+      ...(agentSessionId ? { agentSessionId } : {}),
     };
   }
 

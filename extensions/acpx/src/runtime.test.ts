@@ -284,6 +284,29 @@ describe("AcpxRuntime", () => {
     expect(close?.sessionName).toBe("agent:claude:acp:789");
   });
 
+  it("prefers handle.cwd over the encoded runtime cwd for restored sessions", async () => {
+    const { runtime, logPath } = await createMockRuntimeFixture();
+    const handle = await runtime.ensureSession({
+      sessionKey: "agent:codex:acp:cwd-override",
+      agent: "codex",
+      mode: "persistent",
+    });
+    const overrideCwd = os.tmpdir();
+
+    await runtime.getStatus({
+      handle: {
+        ...handle,
+        cwd: overrideCwd,
+      },
+    });
+
+    const logs = await readMockRuntimeLogEntries(logPath);
+    const statusArgs = (logs.findLast((entry) => entry.kind === "status")?.args as string[]) ?? [];
+    const cwdFlagIndex = statusArgs.indexOf("--cwd");
+    expect(cwdFlagIndex).toBeGreaterThanOrEqual(0);
+    expect(statusArgs[cwdFlagIndex + 1]).toBe(overrideCwd);
+  });
+
   it("exposes control capabilities and runs set-mode/set/status commands", async () => {
     const { runtime, logPath } = await createMockRuntimeFixture();
     const handle = await runtime.ensureSession({
