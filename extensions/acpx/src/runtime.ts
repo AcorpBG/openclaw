@@ -366,6 +366,8 @@ export class AcpxRuntime implements AcpRuntime {
     }
     const cwd = asTrimmedString(input.cwd) || this.config.cwd;
     const mode = input.mode;
+    const envPresent = input.env != null;
+    const bootstrapKeyPresent = Boolean(input.env?.[ACPX_CODEX_BOOTSTRAP_ENV_KEY]);
     const bootstrapDecode =
       agent === "codex"
         ? decodeCodexBootstrapEnvDetailed(input.env)
@@ -379,7 +381,8 @@ export class AcpxRuntime implements AcpRuntime {
         `envPresent=${envPresent}`,
         `bootstrapKeyPresent=${bootstrapKeyPresent}`,
         `bootstrapState=${!bootstrapDecode.present ? "empty" : bootstrapDecode.decoded ? "success" : "failed"}`,
-        this.summarizeCodexBootstrap(codexBootstrap),
+        `model=${codexBootstrap?.model?.trim() || "-"}`,
+        `reasoning=${codexBootstrap?.reasoningEffort?.trim() || "-"}`,
       ].join(" "),
     );
     if (bootstrapDecode.present && !bootstrapDecode.decoded) {
