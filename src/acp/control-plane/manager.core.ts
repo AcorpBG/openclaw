@@ -980,13 +980,46 @@ export class AcpSessionManager {
       this.clearCachedRuntimeState(params.sessionKey);
     }
 
+    const backend = this.deps.requireRuntimeBackend(configuredBackend || undefined);
+    const runtime = backend.runtime;
+    const previousMeta = params.meta;
+    const previousIdentity = resolveSessionIdentityFromMeta(previousMeta);
+    const persistedRuntimeSessionName = previousMeta.runtimeSessionName?.trim();
+    if (persistedRuntimeSessionName) {
+      const persistedHandleIdentifiers =
+        resolveRuntimeHandleIdentifiersFromIdentity(previousIdentity);
+      const persistedHandle: AcpRuntimeHandle = {
+        sessionKey: params.sessionKey,
+        backend: previousMeta.backend || backend.id,
+        runtimeSessionName: persistedRuntimeSessionName,
+        ...(cwd ? { cwd } : {}),
+        ...(persistedHandleIdentifiers.backendSessionId
+          ? { backendSessionId: persistedHandleIdentifiers.backendSessionId }
+          : {}),
+        ...(persistedHandleIdentifiers.agentSessionId
+          ? { agentSessionId: persistedHandleIdentifiers.agentSessionId }
+          : {}),
+      };
+      this.setCachedRuntimeState(params.sessionKey, {
+        runtime,
+        handle: persistedHandle,
+        backend: previousMeta.backend || backend.id,
+        agent,
+        mode,
+        cwd,
+      });
+      return {
+        runtime,
+        handle: persistedHandle,
+        meta: previousMeta,
+      };
+    }
+
     this.enforceConcurrentSessionLimit({
       cfg: params.cfg,
       sessionKey: params.sessionKey,
     });
 
-    const backend = this.deps.requireRuntimeBackend(configuredBackend || undefined);
-    const runtime = backend.runtime;
     const ensured = await withAcpRuntimeErrorBoundary({
       run: async () =>
         await runtime.ensureSession({
@@ -999,8 +1032,6 @@ export class AcpSessionManager {
       fallbackMessage: "Could not initialize ACP session runtime.",
     });
 
-    const previousMeta = params.meta;
-    const previousIdentity = resolveSessionIdentityFromMeta(previousMeta);
     const now = Date.now();
     const effectiveCwd = normalizeText(ensured.cwd) ?? cwd;
     const nextRuntimeOptions = normalizeRuntimeOptions({
