@@ -152,6 +152,24 @@ function decodeCodexBootstrapEnv(
   }
 }
 
+function resolvePreviousHandleStateForEnsure(params: {
+  previousHandle?: AcpRuntimeHandle;
+  sessionKey: string;
+  agent: string;
+}): AcpxHandleState | undefined {
+  if (!params.previousHandle || params.previousHandle.sessionKey !== params.sessionKey) {
+    return undefined;
+  }
+  const decoded = decodeAcpxRuntimeHandleState(params.previousHandle.runtimeSessionName);
+  if (!decoded) {
+    return undefined;
+  }
+  if (decoded.name !== params.sessionKey || decoded.agent !== params.agent) {
+    return undefined;
+  }
+  return decoded;
+}
+
 export class AcpxRuntime implements AcpRuntime {
   private healthy = false;
   private readonly logger?: PluginLogger;
@@ -236,11 +254,31 @@ export class AcpxRuntime implements AcpRuntime {
     if (!agent) {
       throw new AcpRuntimeError("ACP_SESSION_INIT_FAILED", "ACP agent id is required.");
     }
-    const cwd = asTrimmedString(input.cwd) || this.config.cwd;
+    const previousHandleState = resolvePreviousHandleStateForEnsure({
+      previousHandle: input.previousHandle,
+      sessionKey: input.sessionKey,
+      agent,
+    });
+    const cwd = asTrimmedString(input.cwd) || previousHandleState?.cwd || this.config.cwd;
     const mode = input.mode;
     const envPresent = input.env != null;
     const bootstrapKeyPresent = Boolean(input.env?.[ACPX_CODEX_BOOTSTRAP_ENV_KEY]);
-    const codexBootstrap = agent === "codex" ? decodeCodexBootstrapEnv(input.env) : undefined;
+    const envCodexBootstrap = agent === "codex" ? decodeCodexBootstrapEnv(input.env) : undefined;
+    const restoredCodexBootstrap =
+      !bootstrapKeyPresent && agent === "codex" ? previousHandleState?.codexBootstrap : undefined;
+    const codexBootstrap = bootstrapKeyPresent ? envCodexBootstrap : restoredCodexBootstrap;
+    const bootstrapSource = bootstrapKeyPresent
+      ? "env"
+      : restoredCodexBootstrap
+        ? "handle"
+        : "empty";
+    const bootstrapState = bootstrapKeyPresent
+      ? envCodexBootstrap
+        ? "success"
+        : "failed"
+      : restoredCodexBootstrap
+        ? "restored"
+        : "empty";
     this.logger?.debug?.(
       [
         "acpx runtime: ensureSession bootstrap decode",
@@ -248,7 +286,8 @@ export class AcpxRuntime implements AcpRuntime {
         `agent=${agent}`,
         `envPresent=${envPresent}`,
         `bootstrapKeyPresent=${bootstrapKeyPresent}`,
-        `bootstrapState=${bootstrapKeyPresent ? (codexBootstrap ? "success" : "failed") : "empty"}`,
+        `bootstrapSource=${bootstrapSource}`,
+        `bootstrapState=${bootstrapState}`,
         `model=${codexBootstrap?.model?.trim() || "-"}`,
         `reasoning=${codexBootstrap?.reasoningEffort?.trim() || "-"}`,
       ].join(" "),
@@ -457,6 +496,17 @@ export class AcpxRuntime implements AcpRuntime {
       ignoreNoSession: true,
       signal: input.signal,
     });
+    const errorDetail = events.map((event) => toAcpxErrorEvent(event)).find(Boolean) ?? null;
+    if (errorDetail?.code === "NO_SESSION") {
+      return {
+        summary: "status=missing",
+        details: {
+          status: "missing",
+          errorCode: errorDetail.code,
+          message: errorDetail.message,
+        },
+      };
+    }
     const detail = events.find((event) => !toAcpxErrorEvent(event)) ?? events[0];
     if (!detail) {
       return {

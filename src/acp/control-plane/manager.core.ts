@@ -985,33 +985,52 @@ export class AcpSessionManager {
     const previousMeta = params.meta;
     const previousIdentity = resolveSessionIdentityFromMeta(previousMeta);
     const persistedRuntimeSessionName = previousMeta.runtimeSessionName?.trim();
-    if (persistedRuntimeSessionName) {
-      const persistedHandleIdentifiers =
-        resolveRuntimeHandleIdentifiersFromIdentity(previousIdentity);
-      const persistedHandle: AcpRuntimeHandle = {
+    const persistedHandleIdentifiers =
+      resolveRuntimeHandleIdentifiersFromIdentity(previousIdentity);
+    const persistedHandle: AcpRuntimeHandle | null = persistedRuntimeSessionName
+      ? {
+          sessionKey: params.sessionKey,
+          backend: previousMeta.backend || backend.id,
+          runtimeSessionName: persistedRuntimeSessionName,
+          ...(cwd ? { cwd } : {}),
+          ...(persistedHandleIdentifiers.backendSessionId
+            ? { backendSessionId: persistedHandleIdentifiers.backendSessionId }
+            : {}),
+          ...(persistedHandleIdentifiers.agentSessionId
+            ? { agentSessionId: persistedHandleIdentifiers.agentSessionId }
+            : {}),
+        }
+      : null;
+    const restoreValidation = persistedHandle
+      ? await this.validatePersistedRuntimeHandle({
+          sessionKey: params.sessionKey,
+          runtime,
+          handle: persistedHandle,
+        })
+      : { stale: false as const };
+    if (persistedHandle && restoreValidation.runtimeStatus) {
+      const restored = await this.reconcileRuntimeSessionIdentifiers({
+        cfg: params.cfg,
         sessionKey: params.sessionKey,
-        backend: previousMeta.backend || backend.id,
-        runtimeSessionName: persistedRuntimeSessionName,
-        ...(cwd ? { cwd } : {}),
-        ...(persistedHandleIdentifiers.backendSessionId
-          ? { backendSessionId: persistedHandleIdentifiers.backendSessionId }
-          : {}),
-        ...(persistedHandleIdentifiers.agentSessionId
-          ? { agentSessionId: persistedHandleIdentifiers.agentSessionId }
-          : {}),
-      };
-      this.setCachedRuntimeState(params.sessionKey, {
-        runtime,
-        handle: persistedHandle,
-        backend: previousMeta.backend || backend.id,
-        agent,
-        mode,
-        cwd,
-      });
-      return {
         runtime,
         handle: persistedHandle,
         meta: previousMeta,
+        runtimeStatus: restoreValidation.runtimeStatus,
+        failOnStatusError: false,
+      });
+      this.setCachedRuntimeState(params.sessionKey, {
+        runtime,
+        handle: restored.handle,
+        backend: restored.handle.backend || previousMeta.backend || backend.id,
+        agent,
+        mode,
+        cwd: restored.handle.cwd ?? cwd,
+        appliedControlSignature: undefined,
+      });
+      return {
+        runtime,
+        handle: restored.handle,
+        meta: restored.meta,
       };
     }
 
@@ -1027,6 +1046,7 @@ export class AcpSessionManager {
           agent,
           mode,
           cwd,
+          ...(persistedHandle ? { previousHandle: persistedHandle } : {}),
         }),
       fallbackCode: "ACP_SESSION_INIT_FAILED",
       fallbackMessage: "Could not initialize ACP session runtime.",
@@ -1040,7 +1060,7 @@ export class AcpSessionManager {
     });
     const nextIdentity =
       mergeSessionIdentity({
-        current: previousIdentity,
+        current: restoreValidation.stale ? undefined : previousIdentity,
         incoming: createIdentityFromEnsure({
           handle: ensured,
           now,
@@ -1103,6 +1123,70 @@ export class AcpSessionManager {
       handle: nextHandle,
       meta: nextMeta,
     };
+  }
+
+  private async validatePersistedRuntimeHandle(params: {
+    sessionKey: string;
+    runtime: AcpRuntime;
+    handle: AcpRuntimeHandle;
+  }): Promise<{ runtimeStatus?: AcpRuntimeStatus; stale: boolean }> {
+    if (!params.runtime.getStatus) {
+      return { stale: false };
+    }
+    try {
+      const runtimeStatus = await withAcpRuntimeErrorBoundary({
+        run: async () =>
+          await params.runtime.getStatus!({
+            handle: params.handle,
+          }),
+        fallbackCode: "ACP_TURN_FAILED",
+        fallbackMessage: "Could not read ACP runtime status.",
+      });
+      if (this.runtimeStatusIndicatesMissingSession(runtimeStatus)) {
+        logVerbose(
+          `acp-manager: persisted runtime handle is stale for ${params.sessionKey}; reinitializing runtime session`,
+        );
+        return { stale: true };
+      }
+      return {
+        runtimeStatus,
+        stale: false,
+      };
+    } catch (error) {
+      const acpError = toAcpRuntimeError({
+        error,
+        fallbackCode: "ACP_TURN_FAILED",
+        fallbackMessage: "Could not read ACP runtime status.",
+      });
+      if (acpError.code === "ACP_BACKEND_MISSING" || acpError.code === "ACP_BACKEND_UNAVAILABLE") {
+        throw acpError;
+      }
+      logVerbose(
+        `acp-manager: persisted runtime handle validation failed for ${params.sessionKey}; reinitializing runtime session: ${acpError.message}`,
+      );
+      return { stale: false };
+    }
+  }
+
+  private runtimeStatusIndicatesMissingSession(status: AcpRuntimeStatus | undefined): boolean {
+    const details = status?.details;
+    const detailStatus =
+      details && typeof details === "object" && !Array.isArray(details)
+        ? normalizeText(details.status)
+        : undefined;
+    const detailErrorCode =
+      details && typeof details === "object" && !Array.isArray(details)
+        ? normalizeText(details.errorCode ?? details.code)
+        : undefined;
+    const summary = normalizeText(status?.summary)?.toLowerCase();
+    return (
+      detailErrorCode === "NO_SESSION" ||
+      detailStatus === "missing" ||
+      detailStatus === "no-session" ||
+      summary === "status=missing" ||
+      summary === "status=no-session" ||
+      summary === "acpx status unavailable"
+    );
   }
 
   private async persistRuntimeOptions(params: {
