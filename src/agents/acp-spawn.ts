@@ -277,10 +277,6 @@ function logAcpSpawnDiagnostic(message: string): void {
   logVerbose(`acp-spawn: ${message}`);
 }
 
-function hasCodexBootstrapEnv(env?: Record<string, string>): boolean {
-  return Boolean(env?.[ACPX_CODEX_BOOTSTRAP_ENV_KEY]);
-}
-
 function normalizeCodexReasoningEffort(
   value: string | undefined,
 ): { ok: true; reasoningEffort?: string } | { ok: false; error: string } {
@@ -401,14 +397,6 @@ export async function spawnAcpDirect(
     ].join(" "),
   );
   if (!isAcpEnabledByPolicy(cfg)) {
-    logAcpSpawnDiagnostic(
-      [
-        "early return",
-        "stage=policy-disabled",
-        "status=forbidden",
-        "reason=ACP is disabled by policy (`acp.enabled=false`).",
-      ].join(" "),
-    );
     return {
       status: "forbidden",
       error: "ACP is disabled by policy (`acp.enabled=false`).",
@@ -417,14 +405,6 @@ export async function spawnAcpDirect(
   const streamToParentRequested = params.streamTo === "parent";
   const parentSessionKey = ctx.agentSessionKey?.trim();
   if (streamToParentRequested && !parentSessionKey) {
-    logAcpSpawnDiagnostic(
-      [
-        "early return",
-        "stage=stream-parent-context-missing",
-        "status=error",
-        'reason=sessions_spawn streamTo="parent" requires an active requester session context.',
-      ].join(" "),
-    );
     return {
       status: "error",
       error: 'sessions_spawn streamTo="parent" requires an active requester session context.',
@@ -437,14 +417,6 @@ export async function spawnAcpDirect(
     sandbox: params.sandbox,
   });
   if (runtimePolicyError) {
-    logAcpSpawnDiagnostic(
-      [
-        "early return",
-        "stage=runtime-policy",
-        "status=forbidden",
-        `reason=${runtimePolicyError}`,
-      ].join(" "),
-    );
     return {
       status: "forbidden",
       error: runtimePolicyError,
@@ -457,14 +429,6 @@ export async function spawnAcpDirect(
     threadRequested: requestThreadBinding,
   });
   if (spawnMode === "session" && !requestThreadBinding) {
-    logAcpSpawnDiagnostic(
-      [
-        "early return",
-        "stage=mode-thread-mismatch",
-        "status=error",
-        'reason=mode="session" requires thread=true so the ACP session can stay bound to a thread.',
-      ].join(" "),
-    );
     return {
       status: "error",
       error: 'mode="session" requires thread=true so the ACP session can stay bound to a thread.',
@@ -476,14 +440,6 @@ export async function spawnAcpDirect(
     cfg,
   });
   if (!targetAgentResult.ok) {
-    logAcpSpawnDiagnostic(
-      [
-        "early return",
-        "stage=target-agent-resolution",
-        "status=error",
-        `reason=${targetAgentResult.error}`,
-      ].join(" "),
-    );
     return {
       status: "error",
       error: targetAgentResult.error,
@@ -492,15 +448,6 @@ export async function spawnAcpDirect(
   const targetAgentId = targetAgentResult.agentId;
   const agentPolicyError = resolveAcpAgentPolicyError(cfg, targetAgentId);
   if (agentPolicyError) {
-    logAcpSpawnDiagnostic(
-      [
-        "early return",
-        "stage=agent-policy",
-        "status=forbidden",
-        `agent=${targetAgentId}`,
-        `reason=${agentPolicyError.message}`,
-      ].join(" "),
-    );
     return {
       status: "forbidden",
       error: agentPolicyError.message,
@@ -558,17 +505,6 @@ export async function spawnAcpDirect(
       threadId: ctx.agentThreadId,
     });
     if (!prepared.ok) {
-      logAcpSpawnDiagnostic(
-        [
-          "early return",
-          "stage=thread-binding-preflight",
-          "status=error",
-          `agent=${targetAgentId}`,
-          `spawnMode=${spawnMode}`,
-          `thread=${requestThreadBinding}`,
-          `reason=${prepared.error}`,
-        ].join(" "),
-      );
       return {
         status: "error",
         error: prepared.error,
@@ -601,24 +537,7 @@ export async function spawnAcpDirect(
         `spawnMode=${spawnMode}`,
         `thread=${requestThreadBinding}`,
         `cwd=${formatDiagnosticValue(params.cwd)}`,
-        `bootstrapEnvPresent=${Boolean(bootstrapEnv.env)}`,
-        `bootstrapEnvKeyPresent=${hasCodexBootstrapEnv(bootstrapEnv.env)}`,
         `bootstrapEnvCreated=${bootstrapEnv.bootstrapEnvCreated}`,
-        `normalizedModel=${formatDiagnosticValue(bootstrapEnv.normalizedModel)}`,
-        `normalizedReasoning=${formatDiagnosticValue(bootstrapEnv.normalizedReasoningEffort)}`,
-      ].join(" "),
-    );
-    logAcpSpawnDiagnostic(
-      [
-        "before initializeSession",
-        `sessionKey=${sessionKey}`,
-        `backend=${formatDiagnosticValue(cfg.acp?.backend)}`,
-        `agent=${targetAgentId}`,
-        `runtimeMode=${runtimeMode}`,
-        `bootstrapEnvPresent=${Boolean(bootstrapEnv.env)}`,
-        `bootstrapEnvKeyPresent=${hasCodexBootstrapEnv(bootstrapEnv.env)}`,
-        `normalizedModel=${formatDiagnosticValue(bootstrapEnv.normalizedModel)}`,
-        `normalizedReasoning=${formatDiagnosticValue(bootstrapEnv.normalizedReasoningEffort)}`,
       ].join(" "),
     );
     const initialized = await acpManager.initializeSession({
@@ -629,7 +548,6 @@ export async function spawnAcpDirect(
       cwd: params.cwd,
       env: bootstrapEnv.env,
       backendId: cfg.acp?.backend,
-      reason: "sessions-spawn-acp",
     });
     initializedRuntime = {
       runtime: initialized.runtime,
@@ -642,8 +560,6 @@ export async function spawnAcpDirect(
         `runtimeSessionName=${formatDiagnosticValue(initialized.handle.runtimeSessionName)}`,
         `backendSessionId=${formatDiagnosticValue(initialized.handle.backendSessionId)}`,
         `agentSessionId=${formatDiagnosticValue(initialized.handle.agentSessionId)}`,
-        `bootstrapEnvPresent=${Boolean(bootstrapEnv.env)}`,
-        `bootstrapEnvKeyPresent=${hasCodexBootstrapEnv(bootstrapEnv.env)}`,
         `bootstrapEnvCreated=${bootstrapEnv.bootstrapEnvCreated}`,
       ].join(" "),
     );

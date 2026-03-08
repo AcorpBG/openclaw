@@ -285,7 +285,6 @@ export async function handleAcpSpawnAction(
       agent: spawn.agentId,
       mode: spawn.mode,
       cwd: spawn.cwd,
-      reason: "acp-command-lifecycle",
     });
     initializedRuntime = {
       runtime: initialized.runtime,

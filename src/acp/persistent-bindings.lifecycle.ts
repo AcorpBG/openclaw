@@ -87,7 +87,6 @@ export async function ensureConfiguredAcpBindingSession(params: {
       mode: params.spec.mode,
       cwd: params.spec.cwd,
       backendId: params.spec.backend,
-      reason: "persistent-binding-create",
     });
 
     return {
@@ -175,7 +174,6 @@ export async function resetAcpSessionInPlace(params: {
       mode,
       cwd,
       backendId: normalizeText(meta.backend) ?? normalizeText(params.cfg.acp?.backend),
-      reason: "persistent-binding-reinitialize",
     });
 
     const runtimeOptionsPatch = Object.fromEntries(
