@@ -420,7 +420,7 @@ describe("spawnAcpDirect", () => {
     });
   });
 
-  it('maps Codex ACP thinking="off" to reasoningEffort="none" in the bootstrap env', async () => {
+  it('rejects Codex ACP thinking="off" before session init because the Codex CLI does not support it', async () => {
     const result = await spawnAcpDirect(
       {
         task: "Investigate flaky tests",
@@ -432,11 +432,10 @@ describe("spawnAcpDirect", () => {
       },
     );
 
-    expect(result.status).toBe("accepted");
-    const initCall = hoisted.initializeSessionMock.mock.calls[0]?.[0];
-    expect(decodeCodexBootstrapEnv(initCall)).toEqual({
-      reasoningEffort: "none",
-    });
+    expect(result.status).toBe("error");
+    expect(result.error).toContain('thinking="off" is unsupported');
+    expect(result.error).toContain("low, medium, high, xhigh");
+    expect(hoisted.initializeSessionMock).not.toHaveBeenCalled();
   });
 
   it("does not inline delivery for fresh oneshot ACP runs", async () => {
@@ -647,22 +646,39 @@ describe("spawnAcpDirect", () => {
     expect(decodeCodexBootstrapEnv(initCall)).toBeUndefined();
   });
 
-  it("rejects unsupported Codex ACP thinking levels before session init", async () => {
-    const result = await spawnAcpDirect(
-      {
-        task: "hello",
-        agentId: "codex",
-        thinking: "adaptive",
-      },
-      {
-        agentSessionKey: "agent:main:main",
-      },
-    );
+  it.each([
+    {
+      thinking: "adaptive",
+      message: 'thinking="adaptive" is unsupported',
+    },
+    {
+      thinking: "minimal",
+      message: 'thinking="minimal" is unsupported',
+    },
+    {
+      thinking: "none",
+      message: 'Invalid thinking level "none".',
+    },
+  ])(
+    "rejects unsupported Codex ACP thinking=$thinking before session init",
+    async ({ thinking, message }) => {
+      const result = await spawnAcpDirect(
+        {
+          task: "hello",
+          agentId: "codex",
+          thinking,
+        },
+        {
+          agentSessionKey: "agent:main:main",
+        },
+      );
 
-    expect(result.status).toBe("error");
-    expect(result.error).toContain('thinking="adaptive" is unsupported');
-    expect(hoisted.initializeSessionMock).not.toHaveBeenCalled();
-  });
+      expect(result.status).toBe("error");
+      expect(result.error).toContain(message);
+      expect(result.error).toContain("low, medium, high, xhigh");
+      expect(hoisted.initializeSessionMock).not.toHaveBeenCalled();
+    },
+  );
 
   it("requires an explicit ACP agent when no config default exists", async () => {
     const result = await spawnAcpDirect(

@@ -240,9 +240,8 @@ Interface details:
 - `agentId` (optional): ACP target harness id. Falls back to `acp.defaultAgent` if set.
 - `model` (optional): currently supported only when `agentId` resolves to `codex` on the `acpx` backend. The override is applied during Codex ACP bootstrap.
 - `thinking` (optional): currently supported only when `agentId` resolves to `codex` on the `acpx` backend.
-  - supported values: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`
-  - `none` is also accepted as an alias for no reasoning effort
-  - `adaptive` is not supported for ACP Codex bootstrap
+  - supported values: `low`, `medium`, `high`, `xhigh`
+  - `off`, `minimal`, `adaptive`, and `none` are rejected for ACP Codex bootstrap because the Codex CLI does not accept them
 - `thread` (optional, default `false`): request thread binding flow where supported.
 - `mode` (optional): `run` (one-shot) or `session` (persistent).
   - default is `run`

@@ -110,7 +110,7 @@ process.stdout.write(JSON.stringify(process.argv.slice(2)) + "\n");
     expect(JSON.parse(stdout.trim())).toEqual(["--flag", "-c", 'model="gpt-5.3-codex-spark"']);
   });
 
-  it('passes reasoningEffort="none" through to the Codex CLI overrides', async () => {
+  it("ignores unsupported reasoningEffort values instead of forwarding invalid Codex CLI overrides", async () => {
     const argvPrinterPath = await makeTempScript(
       "argv-printer-none.cjs",
       String.raw`#!/usr/bin/env node
@@ -144,6 +144,6 @@ process.stdout.write(JSON.stringify(process.argv.slice(2)) + "\n");
     });
 
     expect(exitCode).toBe(0);
-    expect(JSON.parse(stdout.trim())).toEqual(["-c", 'model_reasoning_effort="none"']);
+    expect(JSON.parse(stdout.trim())).toEqual([]);
   });
 });

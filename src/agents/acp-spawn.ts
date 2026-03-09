@@ -54,7 +54,7 @@ export type SpawnAcpSandboxMode = (typeof ACP_SPAWN_SANDBOX_MODES)[number];
 export const ACP_SPAWN_STREAM_TARGETS = ["parent"] as const;
 export type SpawnAcpStreamTarget = (typeof ACP_SPAWN_STREAM_TARGETS)[number];
 const ACPX_CODEX_BOOTSTRAP_ENV_KEY = "OPENCLAW_ACPX_CODEX_BOOTSTRAP";
-const ACPX_CODEX_SUPPORTED_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const ACPX_CODEX_SUPPORTED_THINKING_LEVELS = ["low", "medium", "high", "xhigh"] as const;
 
 export type SpawnAcpParams = {
   task: string;
@@ -325,10 +325,6 @@ function normalizeCodexReasoningEffort(
   if (!trimmed) {
     return { ok: true };
   }
-  const normalizedRaw = trimmed.toLowerCase();
-  if (normalizedRaw === "none") {
-    return { ok: true, reasoningEffort: "none" };
-  }
   const normalized = normalizeThinkLevel(trimmed);
   if (!normalized) {
     return {
@@ -342,9 +338,21 @@ function normalizeCodexReasoningEffort(
       error: `ACP spawn thinking="adaptive" is unsupported for Codex on acpx. Use one of: ${ACPX_CODEX_SUPPORTED_THINKING_LEVELS.join(", ")}.`,
     };
   }
+  if (normalized === "off") {
+    return {
+      ok: false,
+      error: `ACP spawn thinking="off" is unsupported for Codex on acpx because the Codex CLI accepts only: ${ACPX_CODEX_SUPPORTED_THINKING_LEVELS.join(", ")}.`,
+    };
+  }
+  if (normalized === "minimal") {
+    return {
+      ok: false,
+      error: `ACP spawn thinking="minimal" is unsupported for Codex on acpx because the Codex CLI accepts only: ${ACPX_CODEX_SUPPORTED_THINKING_LEVELS.join(", ")}.`,
+    };
+  }
   return {
     ok: true,
-    reasoningEffort: normalized === "off" ? "none" : normalized,
+    reasoningEffort: normalized,
   };
 }
 

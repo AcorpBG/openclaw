@@ -3,6 +3,16 @@
 import { spawn } from "node:child_process";
 import { splitCommandLine } from "./split-command-line.mjs";
 
+const SUPPORTED_REASONING_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
+
+function normalizeReasoningEffort(value) {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim().toLowerCase();
+  return SUPPORTED_REASONING_EFFORTS.has(trimmed) ? trimmed : undefined;
+}
+
 function decodePayload(argv) {
   const payloadIndex = argv.indexOf("--payload");
   if (payloadIndex < 0) {
@@ -25,10 +35,7 @@ function decodePayload(argv) {
       : {};
   const model =
     typeof bootstrap.model === "string" && bootstrap.model.trim() ? bootstrap.model : "";
-  const reasoningEffort =
-    typeof bootstrap.reasoningEffort === "string" && bootstrap.reasoningEffort.trim()
-      ? bootstrap.reasoningEffort
-      : "";
+  const reasoningEffort = normalizeReasoningEffort(bootstrap.reasoningEffort) ?? "";
   return {
     targetCommand: parsed.targetCommand,
     model: model || undefined,
