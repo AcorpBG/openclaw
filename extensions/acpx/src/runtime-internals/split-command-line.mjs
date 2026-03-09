@@ -26,7 +26,13 @@ export function splitCommandLine(value) {
         current += ch;
         continue;
       }
-      escaping = true;
+      const next = value[index + 1];
+      if (next === '"' || next === "'" || next === "\\" || /\s/.test(next ?? "")) {
+        escaping = true;
+        continue;
+      }
+      // Preserve literal backslashes in unquoted Windows/custom paths.
+      current += ch;
       continue;
     }
     if (quote) {
