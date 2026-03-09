@@ -765,13 +765,13 @@ export class AcpxRuntime implements AcpRuntime {
     if (!wantsMcpProxy && !wantsCodexBootstrap) {
       return null;
     }
-    const cacheKey = [
+    const cacheKey = JSON.stringify([
       params.cwd,
       params.agent,
       params.codexBootstrap?.model ?? "",
       params.codexBootstrap?.reasoningEffort ?? "",
       wantsMcpProxy ? "mcp" : "nomcp",
-    ].join("::");
+    ]);
     const cached = this.agentCommandCache.get(cacheKey);
     if (cached) {
       return cached;

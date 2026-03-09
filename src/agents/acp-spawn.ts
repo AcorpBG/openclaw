@@ -5,6 +5,7 @@ import {
   type AcpSpawnRuntimeCloseHandle,
 } from "../acp/control-plane/spawn.js";
 import { isAcpEnabledByPolicy, resolveAcpAgentPolicyError } from "../acp/policy.js";
+import { requireAcpRuntimeBackend } from "../acp/runtime/registry.js";
 import {
   resolveAcpSessionCwd,
   resolveAcpThreadSessionDetailLines,
@@ -464,8 +465,17 @@ export async function spawnAcpDirect(
       error: agentPolicyError.message,
     };
   }
+  let resolvedBackendId: string;
+  try {
+    resolvedBackendId = requireAcpRuntimeBackend(cfg.acp?.backend).id;
+  } catch (error) {
+    return {
+      status: "error",
+      error: summarizeError(error),
+    };
+  }
   const bootstrapEnv = resolveAcpSpawnBootstrapEnv({
-    backendId: cfg.acp?.backend,
+    backendId: resolvedBackendId,
     agentId: targetAgentId,
     model: params.model,
     thinking: params.thinking,
@@ -537,7 +547,7 @@ export async function spawnAcpDirect(
       mode: runtimeMode,
       cwd: params.cwd,
       env: bootstrapEnv.env,
-      backendId: cfg.acp?.backend,
+      backendId: resolvedBackendId,
     });
     initializedRuntime = {
       runtime: initialized.runtime,
