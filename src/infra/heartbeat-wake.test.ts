@@ -133,6 +133,26 @@ describe("heartbeat-wake", () => {
     expect(hasHeartbeatWakeHandler()).toBe(false);
   });
 
+  it("shares wake handler state across duplicate module copies", async () => {
+    vi.useFakeTimers();
+    const moduleUrl = new URL("./heartbeat-wake.ts", import.meta.url).href;
+    const suffix = Date.now().toString(36);
+    const first = await import(/* @vite-ignore */ `${moduleUrl}?copy=${suffix}-a`);
+    const second = await import(/* @vite-ignore */ `${moduleUrl}?copy=${suffix}-b`);
+
+    first.resetHeartbeatWakeStateForTests();
+    const handler = vi.fn().mockResolvedValue({ status: "ran", durationMs: 1 });
+    first.setHeartbeatWakeHandler(handler);
+
+    second.requestHeartbeatNow({ reason: "manual", coalesceMs: 0 });
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler).toHaveBeenCalledWith({ reason: "manual" });
+
+    first.resetHeartbeatWakeStateForTests();
+  });
+
   it("preempts existing timer when a sooner schedule is requested", async () => {
     vi.useFakeTimers();
     const handler = vi.fn().mockResolvedValue({ status: "ran", durationMs: 1 });

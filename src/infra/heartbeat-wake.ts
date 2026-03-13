@@ -15,14 +15,12 @@ export type HeartbeatWakeHandler = (opts: {
   sessionKey?: string;
 }) => Promise<HeartbeatRunResult>;
 
-let heartbeatsEnabled = true;
-
 export function setHeartbeatsEnabled(enabled: boolean) {
-  heartbeatsEnabled = enabled;
+  state.heartbeatsEnabled = enabled;
 }
 
 export function areHeartbeatsEnabled(): boolean {
-  return heartbeatsEnabled;
+  return state.heartbeatsEnabled;
 }
 
 type WakeTimerKind = "normal" | "retry";
@@ -34,14 +32,32 @@ type PendingWakeReason = {
   sessionKey?: string;
 };
 
-let handler: HeartbeatWakeHandler | null = null;
-let handlerGeneration = 0;
-const pendingWakes = new Map<string, PendingWakeReason>();
-let scheduled = false;
-let running = false;
-let timer: NodeJS.Timeout | null = null;
-let timerDueAt: number | null = null;
-let timerKind: WakeTimerKind | null = null;
+type HeartbeatWakeState = {
+  heartbeatsEnabled: boolean;
+  handler: HeartbeatWakeHandler | null;
+  handlerGeneration: number;
+  pendingWakes: Map<string, PendingWakeReason>;
+  scheduled: boolean;
+  running: boolean;
+  timer: NodeJS.Timeout | null;
+  timerDueAt: number | null;
+  timerKind: WakeTimerKind | null;
+};
+
+const HEARTBEAT_WAKE_STATE_KEY = "__openclawHeartbeatWakeState";
+// Keep wake coordination on globalThis so duplicate bundled module copies
+// still share a single handler/timer lifecycle within one process.
+const state = ((globalThis as Record<string, unknown>)[HEARTBEAT_WAKE_STATE_KEY] ??= {
+  heartbeatsEnabled: true,
+  handler: null,
+  handlerGeneration: 0,
+  pendingWakes: new Map<string, PendingWakeReason>(),
+  scheduled: false,
+  running: false,
+  timer: null,
+  timerDueAt: null,
+  timerKind: null,
+}) as HeartbeatWakeState;
 
 const DEFAULT_COALESCE_MS = 250;
 const DEFAULT_RETRY_MS = 1_000;
@@ -102,59 +118,59 @@ function queuePendingWakeReason(params?: {
     agentId: normalizedAgentId,
     sessionKey: normalizedSessionKey,
   };
-  const previous = pendingWakes.get(wakeTargetKey);
+  const previous = state.pendingWakes.get(wakeTargetKey);
   if (!previous) {
-    pendingWakes.set(wakeTargetKey, next);
+    state.pendingWakes.set(wakeTargetKey, next);
     return;
   }
   if (next.priority > previous.priority) {
-    pendingWakes.set(wakeTargetKey, next);
+    state.pendingWakes.set(wakeTargetKey, next);
     return;
   }
   if (next.priority === previous.priority && next.requestedAt >= previous.requestedAt) {
-    pendingWakes.set(wakeTargetKey, next);
+    state.pendingWakes.set(wakeTargetKey, next);
   }
 }
 
 function schedule(coalesceMs: number, kind: WakeTimerKind = "normal") {
   const delay = Number.isFinite(coalesceMs) ? Math.max(0, coalesceMs) : DEFAULT_COALESCE_MS;
   const dueAt = Date.now() + delay;
-  if (timer) {
+  if (state.timer) {
     // Keep retry cooldown as a hard minimum delay. This prevents the
     // finally-path reschedule (often delay=0) from collapsing backoff.
-    if (timerKind === "retry") {
+    if (state.timerKind === "retry") {
       return;
     }
     // If existing timer fires sooner or at the same time, keep it.
-    if (typeof timerDueAt === "number" && timerDueAt <= dueAt) {
+    if (typeof state.timerDueAt === "number" && state.timerDueAt <= dueAt) {
       return;
     }
     // New request needs to fire sooner — preempt the existing timer.
-    clearTimeout(timer);
-    timer = null;
-    timerDueAt = null;
-    timerKind = null;
+    clearTimeout(state.timer);
+    state.timer = null;
+    state.timerDueAt = null;
+    state.timerKind = null;
   }
-  timerDueAt = dueAt;
-  timerKind = kind;
-  timer = setTimeout(async () => {
-    timer = null;
-    timerDueAt = null;
-    timerKind = null;
-    scheduled = false;
-    const active = handler;
+  state.timerDueAt = dueAt;
+  state.timerKind = kind;
+  state.timer = setTimeout(async () => {
+    state.timer = null;
+    state.timerDueAt = null;
+    state.timerKind = null;
+    state.scheduled = false;
+    const active = state.handler;
     if (!active) {
       return;
     }
-    if (running) {
-      scheduled = true;
+    if (state.running) {
+      state.scheduled = true;
       schedule(delay, kind);
       return;
     }
 
-    const pendingBatch = Array.from(pendingWakes.values());
-    pendingWakes.clear();
-    running = true;
+    const pendingBatch = Array.from(state.pendingWakes.values());
+    state.pendingWakes.clear();
+    state.running = true;
     try {
       for (const pendingWake of pendingBatch) {
         const wakeOpts = {
@@ -184,13 +200,13 @@ function schedule(coalesceMs: number, kind: WakeTimerKind = "normal") {
       }
       schedule(DEFAULT_RETRY_MS, "retry");
     } finally {
-      running = false;
-      if (pendingWakes.size > 0 || scheduled) {
+      state.running = false;
+      if (state.pendingWakes.size > 0 || state.scheduled) {
         schedule(delay, "normal");
       }
     }
   }, delay);
-  timer.unref?.();
+  state.timer.unref?.();
 }
 
 /**
@@ -200,38 +216,38 @@ function schedule(coalesceMs: number, kind: WakeTimerKind = "normal") {
  * a race where an old runner's cleanup clears a newer runner's handler.
  */
 export function setHeartbeatWakeHandler(next: HeartbeatWakeHandler | null): () => void {
-  handlerGeneration += 1;
-  const generation = handlerGeneration;
-  handler = next;
+  state.handlerGeneration += 1;
+  const generation = state.handlerGeneration;
+  state.handler = next;
   if (next) {
     // New lifecycle starting (e.g. after SIGUSR1 in-process restart).
     // Clear any timer metadata from the previous lifecycle so stale retry
     // cooldowns do not delay a fresh handler.
-    if (timer) {
-      clearTimeout(timer);
+    if (state.timer) {
+      clearTimeout(state.timer);
     }
-    timer = null;
-    timerDueAt = null;
-    timerKind = null;
+    state.timer = null;
+    state.timerDueAt = null;
+    state.timerKind = null;
     // Reset module-level execution state that may be stale from interrupted
     // runs in the previous lifecycle. Without this, `running === true` from
     // an interrupted heartbeat blocks all future schedule() attempts, and
     // `scheduled === true` can cause spurious immediate re-runs.
-    running = false;
-    scheduled = false;
+    state.running = false;
+    state.scheduled = false;
   }
-  if (handler && pendingWakes.size > 0) {
+  if (state.handler && state.pendingWakes.size > 0) {
     schedule(DEFAULT_COALESCE_MS, "normal");
   }
   return () => {
-    if (handlerGeneration !== generation) {
+    if (state.handlerGeneration !== generation) {
       return;
     }
-    if (handler !== next) {
+    if (state.handler !== next) {
       return;
     }
-    handlerGeneration += 1;
-    handler = null;
+    state.handlerGeneration += 1;
+    state.handler = null;
   };
 }
 
@@ -250,23 +266,23 @@ export function requestHeartbeatNow(opts?: {
 }
 
 export function hasHeartbeatWakeHandler() {
-  return handler !== null;
+  return state.handler !== null;
 }
 
 export function hasPendingHeartbeatWake() {
-  return pendingWakes.size > 0 || Boolean(timer) || scheduled;
+  return state.pendingWakes.size > 0 || Boolean(state.timer) || state.scheduled;
 }
 
 export function resetHeartbeatWakeStateForTests() {
-  if (timer) {
-    clearTimeout(timer);
+  if (state.timer) {
+    clearTimeout(state.timer);
   }
-  timer = null;
-  timerDueAt = null;
-  timerKind = null;
-  pendingWakes.clear();
-  scheduled = false;
-  running = false;
-  handlerGeneration += 1;
-  handler = null;
+  state.timer = null;
+  state.timerDueAt = null;
+  state.timerKind = null;
+  state.pendingWakes.clear();
+  state.scheduled = false;
+  state.running = false;
+  state.handlerGeneration += 1;
+  state.handler = null;
 }
