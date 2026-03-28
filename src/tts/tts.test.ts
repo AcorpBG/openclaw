@@ -7,6 +7,7 @@ import type { OpenClawConfig } from "../config/config.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
 import { withEnv } from "../test-utils/env.js";
+import { openaiTTSStream } from "./tts-core.js";
 import * as tts from "./tts.js";
 
 let completeSimple: typeof import("@mariozechner/pi-ai").completeSimple;
@@ -772,6 +773,71 @@ describe("tts", () => {
       ] as const) {
         await expectTelephonyInstructions(testCase.model, testCase.expectedInstructions);
       }
+    });
+  });
+
+  describe("openaiTTSStream timeout lifecycle", () => {
+    it("does not abort the response signal after the stream has started", async () => {
+      vi.useFakeTimers();
+      const originalFetch = globalThis.fetch;
+      let capturedSignal: AbortSignal | undefined;
+      globalThis.fetch = vi.fn(async (_input, init) => {
+        capturedSignal = init?.signal as AbortSignal | undefined;
+        return {
+          ok: true,
+          body: new ReadableStream({
+            start(controller) {
+              controller.enqueue(new Uint8Array([1, 2, 3]));
+            },
+          }),
+        } as Response;
+      }) as unknown as typeof fetch;
+
+      try {
+        const result = await openaiTTSStream({
+          text: "hello",
+          apiKey: "test-key",
+          baseUrl: "https://api.openai.com/v1",
+          model: "gpt-4o-mini-tts",
+          voice: "alloy",
+          responseFormat: "opus",
+          timeoutMs: 10,
+        });
+
+        await vi.advanceTimersByTimeAsync(20);
+        expect(capturedSignal?.aborted).toBe(false);
+
+        result.abort();
+        expect(capturedSignal?.aborted).toBe(true);
+      } finally {
+        globalThis.fetch = originalFetch;
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe("openai pcm format safety", () => {
+    it("rejects configured pcm output for non-telephony synthesis", async () => {
+      const result = await tts.synthesizeSpeech({
+        text: "Hello there, friendly caller.",
+        cfg: {
+          messages: {
+            tts: {
+              provider: "openai",
+              openai: {
+                apiKey: "test-key",
+                model: "gpt-4o-mini-tts",
+                voice: "alloy",
+                responseFormat: "pcm",
+              },
+            },
+          },
+        },
+        disableFallback: true,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("pcm output is only supported for telephony");
     });
   });
 

@@ -710,10 +710,7 @@ async function createOpenAITtsResponse(params: {
   }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  const dispose = () => {
-    clearTimeout(timeout);
-    controller.abort();
-  };
+  const dispose = () => controller.abort();
 
   try {
     const response = await fetch(`${baseUrl}/audio/speech`, {
@@ -735,9 +732,14 @@ async function createOpenAITtsResponse(params: {
     });
 
     if (!response.ok) {
+      clearTimeout(timeout);
       dispose();
       throw new Error(`OpenAI TTS API error (${response.status})`);
     }
+
+    // The timeout only protects request establishment. Once the response body is
+    // flowing, playback may legitimately last longer than timeoutMs.
+    clearTimeout(timeout);
 
     return {
       response,

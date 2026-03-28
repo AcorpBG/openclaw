@@ -7,39 +7,52 @@ import {
   openaiTTSStream,
 } from "openclaw/plugin-sdk/speech";
 
-const OPENAI_FILE_EXTENSIONS = {
-  wav: ".wav",
-  opus: ".opus",
-  mp3: ".mp3",
-  aac: ".aac",
-  pcm: ".wav",
-} as const;
-
 type OpenAIOutputFormat = (typeof OPENAI_TTS_OUTPUT_FORMATS)[number];
+type OpenAIFileOutputFormat = Exclude<OpenAIOutputFormat, "pcm">;
 
 function resolveSynthesisFormat(
   req: Parameters<SpeechProviderPlugin["synthesize"]>[0],
-): OpenAIOutputFormat {
+): OpenAIFileOutputFormat {
   const override = req.overrides?.openai?.outputFormat;
   if (override) {
-    return override;
+    return assertFileSynthesisFormat(override);
   }
   const configured = req.config.openai.responseFormat;
   if (configured) {
-    return configured;
+    return assertFileSynthesisFormat(configured);
   }
   return req.target === "voice-note" ? "opus" : "mp3";
 }
 
+function assertFileSynthesisFormat(format: OpenAIOutputFormat): OpenAIFileOutputFormat {
+  if (format === "pcm") {
+    throw new Error("OpenAI pcm output is only supported for telephony synthesis");
+  }
+  return format;
+}
+
+function inferFileExtension(outputFormat: OpenAIFileOutputFormat): string {
+  switch (outputFormat) {
+    case "wav":
+      return ".wav";
+    case "opus":
+      return ".opus";
+    case "mp3":
+      return ".mp3";
+    case "aac":
+      return ".aac";
+  }
+}
+
 function toSpeechResult(params: {
   audioBuffer: Buffer;
-  outputFormat: OpenAIOutputFormat;
+  outputFormat: OpenAIFileOutputFormat;
   target: Parameters<SpeechProviderPlugin["synthesize"]>[0]["target"];
 }) {
   return {
     audioBuffer: params.audioBuffer,
     outputFormat: params.outputFormat,
-    fileExtension: OPENAI_FILE_EXTENSIONS[params.outputFormat],
+    fileExtension: inferFileExtension(params.outputFormat),
     voiceCompatible: params.target === "voice-note" && params.outputFormat === "opus",
   };
 }
@@ -95,7 +108,7 @@ export function buildOpenAISpeechProvider(): SpeechProviderPlugin {
       return {
         audioStream: audio.audioStream,
         outputFormat: responseFormat,
-        fileExtension: OPENAI_FILE_EXTENSIONS[responseFormat],
+        fileExtension: inferFileExtension(responseFormat),
         voiceCompatible: req.target === "voice-note" && responseFormat === "opus",
         abort: audio.abort,
       };
