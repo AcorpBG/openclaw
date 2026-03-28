@@ -6,6 +6,8 @@ export type TtsMode = "final" | "all";
 
 export type TtsAutoMode = "off" | "always" | "inbound" | "tagged";
 
+export type OpenAITtsOutputFormat = "wav" | "opus" | "mp3" | "aac" | "pcm";
+
 export type TtsModelOverrideConfig = {
   /** Enable model-provided overrides for TTS. */
   enabled?: boolean;
@@ -61,6 +63,8 @@ export type TtsConfig = {
     baseUrl?: string;
     model?: string;
     voice?: string;
+    /** Optional output format for OpenAI-compatible TTS. */
+    responseFormat?: OpenAITtsOutputFormat;
     /** Playback speed (0.25–4.0, default 1.0). */
     speed?: number;
     /** System-level instructions for the TTS model (gpt-4o-mini-tts only). */

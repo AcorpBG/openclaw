@@ -2,6 +2,16 @@ import { describe, expect, it } from "vitest";
 import { TtsConfigSchema } from "./zod-schema.core.js";
 
 describe("TtsConfigSchema openai speed and instructions", () => {
+  it("accepts a supported OpenAI response format", () => {
+    expect(() =>
+      TtsConfigSchema.parse({
+        openai: {
+          responseFormat: "wav",
+        },
+      }),
+    ).not.toThrow();
+  });
+
   it("accepts speed and instructions in openai section", () => {
     expect(() =>
       TtsConfigSchema.parse({
@@ -29,6 +39,16 @@ describe("TtsConfigSchema openai speed and instructions", () => {
       TtsConfigSchema.parse({
         openai: {
           speed: 0.1,
+        },
+      }),
+    ).toThrow();
+  });
+
+  it("rejects an unsupported OpenAI response format", () => {
+    expect(() =>
+      TtsConfigSchema.parse({
+        openai: {
+          responseFormat: "flac",
         },
       }),
     ).toThrow();

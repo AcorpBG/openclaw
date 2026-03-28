@@ -1,3 +1,4 @@
+import type { Readable } from "node:stream";
 import type { OpenClawConfig } from "../config/config.js";
 import type { ResolvedTtsConfig, TtsDirectiveOverrides } from "./tts.js";
 
@@ -23,6 +24,16 @@ export type SpeechSynthesisResult = {
   outputFormat: string;
   fileExtension: string;
   voiceCompatible: boolean;
+};
+
+export type SpeechSynthesisStreamRequest = SpeechSynthesisRequest;
+
+export type SpeechSynthesisStreamResult = {
+  audioStream: Readable;
+  outputFormat: string;
+  fileExtension: string;
+  voiceCompatible: boolean;
+  abort?: () => void;
 };
 
 export type SpeechTelephonySynthesisRequest = {

@@ -19,7 +19,7 @@ import { logVerbose, shouldLogVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { parseTtsDirectives } from "openclaw/plugin-sdk/speech";
-import { textToSpeech } from "openclaw/plugin-sdk/speech-runtime";
+import { textToSpeechStream } from "openclaw/plugin-sdk/speech-runtime";
 import { formatMention } from "../mentions.js";
 import { resolveDiscordOwnerAccess } from "../monitor/allow-list.js";
 import { formatDiscordUserTag } from "../monitor/format.js";
@@ -62,6 +62,7 @@ type VoiceSessionEntry = {
   playbackQueue: Promise<void>;
   processingQueue: Promise<void>;
   activeSpeakers: Set<string>;
+  activePlaybackAbort?: () => void;
   decryptFailureCount: number;
   lastDecryptFailureAt: number;
   decryptRecoveryInFlight: boolean;
@@ -431,6 +432,7 @@ export class DiscordVoiceManager {
       playbackQueue: Promise.resolve(),
       processingQueue: Promise.resolve(),
       activeSpeakers: new Set(),
+      activePlaybackAbort: undefined,
       decryptFailureCount: 0,
       lastDecryptFailureAt: 0,
       decryptRecoveryInFlight: false,
@@ -447,6 +449,8 @@ export class DiscordVoiceManager {
         if (playerErrorHandler) {
           player.off("error", playerErrorHandler);
         }
+        entry.activePlaybackAbort?.();
+        entry.activePlaybackAbort = undefined;
         player.stop();
         connection.destroy();
       },
@@ -543,6 +547,8 @@ export class DiscordVoiceManager {
       `capture start: guild ${entry.guildId} channel ${entry.channelId} user ${userId}`,
     );
     const voiceSdk = loadDiscordVoiceSdk();
+    entry.activePlaybackAbort?.();
+    entry.activePlaybackAbort = undefined;
     if (entry.player.state.status === voiceSdk.AudioPlayerStatus.Playing) {
       entry.player.stop(true);
     }
@@ -658,35 +664,51 @@ export class DiscordVoiceManager {
       return;
     }
 
-    const ttsResult = await textToSpeech({
+    const ttsResult = await textToSpeechStream({
       text: speakText,
       cfg: ttsCfg,
       channel: "discord",
-      overrides: directive.overrides,
+      overrides: {
+        ...directive.overrides,
+        openai: {
+          ...directive.overrides.openai,
+          // Discord voice playback is always streamed as Opus.
+          outputFormat: "opus",
+        },
+      },
     });
-    if (!ttsResult.success || !ttsResult.audioPath) {
+    if (!ttsResult.success || !ttsResult.audioStream) {
       logger.warn(`discord voice: TTS failed: ${ttsResult.error ?? "unknown error"}`);
       return;
     }
-    const audioPath = ttsResult.audioPath;
     logVoiceVerbose(
       `tts ok (${speakText.length} chars): guild ${entry.guildId} channel ${entry.channelId}`,
     );
 
+    const audioStream = ttsResult.audioStream;
+
     this.enqueuePlayback(entry, async () => {
+      entry.activePlaybackAbort = ttsResult.abort;
       logVoiceVerbose(
-        `playback start: guild ${entry.guildId} channel ${entry.channelId} file ${path.basename(audioPath)}`,
+        `playback start: guild ${entry.guildId} channel ${entry.channelId} format ${ttsResult.outputFormat ?? "unknown"}`,
       );
       const voiceSdk = loadDiscordVoiceSdk();
-      const resource = voiceSdk.createAudioResource(audioPath);
-      entry.player.play(resource);
-      await voiceSdk
-        .entersState(entry.player, voiceSdk.AudioPlayerStatus.Playing, PLAYBACK_READY_TIMEOUT_MS)
-        .catch(() => undefined);
-      await voiceSdk
-        .entersState(entry.player, voiceSdk.AudioPlayerStatus.Idle, SPEAKING_READY_TIMEOUT_MS)
-        .catch(() => undefined);
-      logVoiceVerbose(`playback done: guild ${entry.guildId} channel ${entry.channelId}`);
+      try {
+        const resource = voiceSdk.createAudioResource(audioStream);
+        entry.player.play(resource);
+        await voiceSdk
+          .entersState(entry.player, voiceSdk.AudioPlayerStatus.Playing, PLAYBACK_READY_TIMEOUT_MS)
+          .catch(() => undefined);
+        await voiceSdk
+          .entersState(entry.player, voiceSdk.AudioPlayerStatus.Idle, SPEAKING_READY_TIMEOUT_MS)
+          .catch(() => undefined);
+        logVoiceVerbose(`playback done: guild ${entry.guildId} channel ${entry.channelId}`);
+      } finally {
+        ttsResult.abort?.();
+        if (entry.activePlaybackAbort === ttsResult.abort) {
+          entry.activePlaybackAbort = undefined;
+        }
+      }
     });
   }
 

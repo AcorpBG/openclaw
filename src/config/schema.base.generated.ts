@@ -8395,6 +8395,10 @@ export const GENERATED_BASE_CONFIG_SCHEMA = {
                   voice: {
                     type: "string",
                   },
+                  responseFormat: {
+                    type: "string",
+                    enum: ["wav", "opus", "mp3", "aac", "pcm"],
+                  },
                   speed: {
                     type: "number",
                     minimum: 0.25,

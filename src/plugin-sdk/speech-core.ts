@@ -8,8 +8,10 @@ export {
   elevenLabsTTS,
   inferEdgeExtension,
   OPENAI_TTS_MODELS,
+  OPENAI_TTS_OUTPUT_FORMATS,
   OPENAI_TTS_VOICES,
   openaiTTS,
+  openaiTTSStream,
   parseTtsDirectives,
 } from "../tts/tts-core.js";
 

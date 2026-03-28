@@ -1,4 +1,5 @@
 import { rmSync, statSync } from "node:fs";
+import { Readable } from "node:stream";
 import { completeSimple, type TextContent } from "@mariozechner/pi-ai";
 import { EdgeTTS } from "node-edge-tts";
 import { getApiKeyForModel, requireApiKey } from "../agents/model-auth.js";
@@ -344,7 +345,13 @@ export function parseTtsDirectives(
   };
 }
 
-export const OPENAI_TTS_MODELS = ["gpt-4o-mini-tts", "tts-1", "tts-1-hd"] as const;
+export const OPENAI_TTS_MODELS = [
+  "gpt-4o-mini-tts",
+  "gpt-4o-mini-tts-2025-12-15",
+  "tts-1",
+  "tts-1-hd",
+] as const;
+export const OPENAI_TTS_OUTPUT_FORMATS = ["wav", "opus", "mp3", "aac", "pcm"] as const;
 
 /**
  * Custom OpenAI-compatible TTS endpoint.
@@ -381,6 +388,7 @@ export const OPENAI_TTS_VOICES = [
 ] as const;
 
 type OpenAiTtsVoice = (typeof OPENAI_TTS_VOICES)[number];
+export type OpenAITtsOutputFormat = (typeof OPENAI_TTS_OUTPUT_FORMATS)[number];
 
 export function isValidOpenAIModel(model: string, baseUrl?: string): boolean {
   // Allow any model when using custom endpoint (e.g., Kokoro, LocalAI)
@@ -404,6 +412,12 @@ export function isValidOpenAIVoice(voice: string, baseUrl?: string): voice is Op
     return true;
   }
   return OPENAI_TTS_VOICES.includes(voice as OpenAiTtsVoice);
+}
+
+export function isValidOpenAIResponseFormat(
+  responseFormat: string,
+): responseFormat is OpenAITtsOutputFormat {
+  return OPENAI_TTS_OUTPUT_FORMATS.includes(responseFormat as OpenAITtsOutputFormat);
 }
 
 type SummarizeResult = {
@@ -624,11 +638,68 @@ export async function openaiTTS(params: {
   voice: string;
   speed?: number;
   instructions?: string;
-  responseFormat: "mp3" | "opus" | "pcm";
+  responseFormat: OpenAITtsOutputFormat;
   timeoutMs: number;
 }): Promise<Buffer> {
-  const { text, apiKey, baseUrl, model, voice, speed, instructions, responseFormat, timeoutMs } =
-    params;
+  const response = await createOpenAITtsResponse(params);
+  try {
+    return Buffer.from(await response.response.arrayBuffer());
+  } finally {
+    response.dispose();
+  }
+}
+
+export async function openaiTTSStream(params: {
+  text: string;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  voice: string;
+  speed?: number;
+  instructions?: string;
+  responseFormat: OpenAITtsOutputFormat;
+  timeoutMs: number;
+}): Promise<{ audioStream: Readable; abort: () => void }> {
+  const response = await createOpenAITtsResponse({ ...params, streamFormat: "audio" });
+  const body = response.response.body;
+  if (!body) {
+    response.dispose();
+    throw new Error("OpenAI TTS API returned an empty response body");
+  }
+  const audioStream = Readable.fromWeb(body as unknown as Parameters<typeof Readable.fromWeb>[0]);
+  return {
+    audioStream,
+    abort: response.dispose,
+  };
+}
+
+async function createOpenAITtsResponse(params: {
+  text: string;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  voice: string;
+  speed?: number;
+  instructions?: string;
+  responseFormat: OpenAITtsOutputFormat;
+  timeoutMs: number;
+  streamFormat?: "audio";
+}): Promise<{
+  response: Response;
+  dispose: () => void;
+}> {
+  const {
+    text,
+    apiKey,
+    baseUrl,
+    model,
+    voice,
+    speed,
+    instructions,
+    responseFormat,
+    timeoutMs,
+    streamFormat,
+  } = params;
   const effectiveInstructions = resolveOpenAITtsInstructions(model, instructions);
 
   if (!isValidOpenAIModel(model, baseUrl)) {
@@ -637,9 +708,12 @@ export async function openaiTTS(params: {
   if (!isValidOpenAIVoice(voice, baseUrl)) {
     throw new Error(`Invalid voice: ${voice}`);
   }
-
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const dispose = () => {
+    clearTimeout(timeout);
+    controller.abort();
+  };
 
   try {
     const response = await fetch(`${baseUrl}/audio/speech`, {
@@ -653,6 +727,7 @@ export async function openaiTTS(params: {
         input: text,
         voice,
         response_format: responseFormat,
+        ...(streamFormat != null && { stream_format: streamFormat }),
         ...(speed != null && { speed }),
         ...(effectiveInstructions != null && { instructions: effectiveInstructions }),
       }),
@@ -660,12 +735,17 @@ export async function openaiTTS(params: {
     });
 
     if (!response.ok) {
+      dispose();
       throw new Error(`OpenAI TTS API error (${response.status})`);
     }
 
-    return Buffer.from(await response.arrayBuffer());
-  } finally {
+    return {
+      response,
+      dispose,
+    };
+  } catch (err) {
     clearTimeout(timeout);
+    throw err;
   }
 }
 

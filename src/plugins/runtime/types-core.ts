@@ -68,6 +68,7 @@ export type PluginRuntimeCore = {
   };
   tts: {
     textToSpeech: typeof import("../../tts/runtime.js").textToSpeech;
+    textToSpeechStream: typeof import("../../tts/runtime.js").textToSpeechStream;
     textToSpeechTelephony: typeof import("../../tts/runtime.js").textToSpeechTelephony;
     listVoices: typeof import("../../tts/runtime.js").listSpeechVoices;
   };

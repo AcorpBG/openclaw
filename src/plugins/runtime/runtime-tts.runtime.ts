@@ -1,1 +1,6 @@
-export { listSpeechVoices, textToSpeech, textToSpeechTelephony } from "../../tts/runtime.js";
+export {
+  listSpeechVoices,
+  textToSpeech,
+  textToSpeechStream,
+  textToSpeechTelephony,
+} from "../../tts/runtime.js";

@@ -397,7 +397,7 @@
           "exportName": "MediaUnderstandingProviderPlugin",
           "kind": "type",
           "source": {
-            "line": 951,
+            "line": 954,
             "path": "src/plugins/types.ts"
           }
         },
@@ -415,7 +415,7 @@
           "exportName": "OpenClawPluginApi",
           "kind": "type",
           "source": {
-            "line": 1314,
+            "line": 1317,
             "path": "src/plugins/types.ts"
           }
         },
@@ -3396,7 +3396,7 @@
           "exportName": "MediaUnderstandingProviderPlugin",
           "kind": "type",
           "source": {
-            "line": 951,
+            "line": 954,
             "path": "src/plugins/types.ts"
           }
         },
@@ -3414,7 +3414,7 @@
           "exportName": "OpenClawPluginApi",
           "kind": "type",
           "source": {
-            "line": 1314,
+            "line": 1317,
             "path": "src/plugins/types.ts"
           }
         },
@@ -3423,7 +3423,7 @@
           "exportName": "OpenClawPluginCommandDefinition",
           "kind": "type",
           "source": {
-            "line": 1068,
+            "line": 1071,
             "path": "src/plugins/types.ts"
           }
         },
@@ -3441,7 +3441,7 @@
           "exportName": "OpenClawPluginDefinition",
           "kind": "type",
           "source": {
-            "line": 1296,
+            "line": 1299,
             "path": "src/plugins/types.ts"
           }
         },
@@ -3450,7 +3450,7 @@
           "exportName": "OpenClawPluginService",
           "kind": "type",
           "source": {
-            "line": 1285,
+            "line": 1288,
             "path": "src/plugins/types.ts"
           }
         },
@@ -3459,7 +3459,7 @@
           "exportName": "OpenClawPluginServiceContext",
           "kind": "type",
           "source": {
-            "line": 1277,
+            "line": 1280,
             "path": "src/plugins/types.ts"
           }
         },
@@ -3486,7 +3486,7 @@
           "exportName": "PluginCommandContext",
           "kind": "type",
           "source": {
-            "line": 966,
+            "line": 969,
             "path": "src/plugins/types.ts"
           }
         },
@@ -3495,7 +3495,7 @@
           "exportName": "PluginInteractiveTelegramHandlerContext",
           "kind": "type",
           "source": {
-            "line": 1097,
+            "line": 1100,
             "path": "src/plugins/types.ts"
           }
         },
@@ -3902,7 +3902,7 @@
           "exportName": "MediaUnderstandingProviderPlugin",
           "kind": "type",
           "source": {
-            "line": 951,
+            "line": 954,
             "path": "src/plugins/types.ts"
           }
         },
@@ -3920,7 +3920,7 @@
           "exportName": "OpenClawPluginApi",
           "kind": "type",
           "source": {
-            "line": 1314,
+            "line": 1317,
             "path": "src/plugins/types.ts"
           }
         },
@@ -3929,7 +3929,7 @@
           "exportName": "OpenClawPluginCommandDefinition",
           "kind": "type",
           "source": {
-            "line": 1068,
+            "line": 1071,
             "path": "src/plugins/types.ts"
           }
         },
@@ -3947,7 +3947,7 @@
           "exportName": "OpenClawPluginDefinition",
           "kind": "type",
           "source": {
-            "line": 1296,
+            "line": 1299,
             "path": "src/plugins/types.ts"
           }
         },
@@ -3956,7 +3956,7 @@
           "exportName": "OpenClawPluginService",
           "kind": "type",
           "source": {
-            "line": 1285,
+            "line": 1288,
             "path": "src/plugins/types.ts"
           }
         },
@@ -3965,7 +3965,7 @@
           "exportName": "OpenClawPluginServiceContext",
           "kind": "type",
           "source": {
-            "line": 1277,
+            "line": 1280,
             "path": "src/plugins/types.ts"
           }
         },
@@ -3974,7 +3974,7 @@
           "exportName": "PluginCommandContext",
           "kind": "type",
           "source": {
-            "line": 966,
+            "line": 969,
             "path": "src/plugins/types.ts"
           }
         },
@@ -3983,7 +3983,7 @@
           "exportName": "PluginInteractiveTelegramHandlerContext",
           "kind": "type",
           "source": {
-            "line": 1097,
+            "line": 1100,
             "path": "src/plugins/types.ts"
           }
         },

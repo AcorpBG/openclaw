@@ -8544,7 +8544,8 @@
       "path": "channels.bluebubbles.accounts.*.enrichGroupParticipantsFromContacts",
       "kind": "channel",
       "type": "boolean",
-      "required": false,
+      "required": true,
+      "defaultValue": true,
       "deprecated": false,
       "sensitive": false,
       "tags": [],
@@ -9095,7 +9096,8 @@
       "path": "channels.bluebubbles.enrichGroupParticipantsFromContacts",
       "kind": "channel",
       "type": "boolean",
-      "required": false,
+      "required": true,
+      "defaultValue": true,
       "deprecated": false,
       "sensitive": false,
       "tags": [],
@@ -12199,6 +12201,23 @@
       "hasChildren": false
     },
     {
+      "path": "channels.discord.accounts.*.voice.tts.openai.responseFormat",
+      "kind": "channel",
+      "type": "string",
+      "required": false,
+      "enumValues": [
+        "wav",
+        "opus",
+        "mp3",
+        "aac",
+        "pcm"
+      ],
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "hasChildren": false
+    },
+    {
       "path": "channels.discord.accounts.*.voice.tts.openai.speed",
       "kind": "channel",
       "type": "number",
@@ -15277,6 +15296,23 @@
       "kind": "channel",
       "type": "string",
       "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "hasChildren": false
+    },
+    {
+      "path": "channels.discord.voice.tts.openai.responseFormat",
+      "kind": "channel",
+      "type": "string",
+      "required": false,
+      "enumValues": [
+        "wav",
+        "opus",
+        "mp3",
+        "aac",
+        "pcm"
+      ],
       "deprecated": false,
       "sensitive": false,
       "tags": [],
@@ -45065,6 +45101,23 @@
       "kind": "core",
       "type": "string",
       "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "hasChildren": false
+    },
+    {
+      "path": "messages.tts.openai.responseFormat",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "enumValues": [
+        "wav",
+        "opus",
+        "mp3",
+        "aac",
+        "pcm"
+      ],
       "deprecated": false,
       "sensitive": false,
       "tags": [],

@@ -9,6 +9,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
 import type { ReplyPayload } from "../auto-reply/types.js";
 import { normalizeChannelId } from "../channels/plugins/index.js";
@@ -16,6 +17,7 @@ import type { ChannelId } from "../channels/plugins/types.js";
 import type { OpenClawConfig } from "../config/config.js";
 import { normalizeResolvedSecretInputString } from "../config/types.secrets.js";
 import type {
+  OpenAITtsOutputFormat,
   TtsConfig,
   TtsAutoMode,
   TtsMode,
@@ -38,6 +40,7 @@ import {
 import type { SpeechVoiceOption } from "./provider-types.js";
 import {
   DEFAULT_OPENAI_BASE_URL,
+  isValidOpenAIResponseFormat,
   isValidOpenAIModel,
   isValidOpenAIVoice,
   isValidVoiceId,
@@ -116,6 +119,7 @@ export type ResolvedTtsConfig = {
     baseUrl: string;
     model: string;
     voice: string;
+    responseFormat?: OpenAITtsOutputFormat;
     speed?: number;
     instructions?: string;
   };
@@ -164,6 +168,7 @@ export type TtsDirectiveOverrides = {
   openai?: {
     voice?: string;
     model?: string;
+    outputFormat?: OpenAITtsOutputFormat;
     speed?: number;
   };
   elevenlabs?: {
@@ -209,6 +214,20 @@ export type TtsSynthesisResult = {
   voiceCompatible?: boolean;
   fileExtension?: string;
 };
+
+export type TtsStreamResult = {
+  success: boolean;
+  audioStream?: Readable;
+  error?: string;
+  latencyMs?: number;
+  provider?: string;
+  outputFormat?: string;
+  voiceCompatible?: boolean;
+  fileExtension?: string;
+  abort?: () => void;
+};
+
+export type TtsStreamSynthesisResult = TtsStreamResult;
 
 export type TtsTelephonyResult = {
   success: boolean;
@@ -323,6 +342,9 @@ export function resolveTtsConfig(cfg: OpenClawConfig): ResolvedTtsConfig {
       ).replace(/\/+$/, ""),
       model: raw.openai?.model ?? DEFAULT_OPENAI_MODEL,
       voice: raw.openai?.voice ?? DEFAULT_OPENAI_VOICE,
+      responseFormat: isValidOpenAIResponseFormat(raw.openai?.responseFormat ?? "")
+        ? raw.openai?.responseFormat
+        : undefined,
       speed: raw.openai?.speed,
       instructions: raw.openai?.instructions?.trim() || undefined,
     },
@@ -675,6 +697,17 @@ export async function textToSpeech(params: {
   };
 }
 
+export async function textToSpeechStream(params: {
+  text: string;
+  cfg: OpenClawConfig;
+  prefsPath?: string;
+  channel?: string;
+  overrides?: TtsDirectiveOverrides;
+  disableFallback?: boolean;
+}): Promise<TtsStreamResult> {
+  return await synthesizeSpeechStream(params);
+}
+
 export async function synthesizeSpeech(params: {
   text: string;
   cfg: OpenClawConfig;
@@ -722,6 +755,87 @@ export async function synthesizeSpeech(params: {
       return {
         success: true,
         audioBuffer: synthesis.audioBuffer,
+        latencyMs: Date.now() - providerStart,
+        provider,
+        outputFormat: synthesis.outputFormat,
+        voiceCompatible: synthesis.voiceCompatible,
+        fileExtension: synthesis.fileExtension,
+      };
+    } catch (err) {
+      errors.push(formatTtsProviderError(provider, err));
+    }
+  }
+
+  return buildTtsFailureResult(errors);
+}
+
+export async function synthesizeSpeechStream(params: {
+  text: string;
+  cfg: OpenClawConfig;
+  prefsPath?: string;
+  channel?: string;
+  overrides?: TtsDirectiveOverrides;
+  disableFallback?: boolean;
+}): Promise<TtsStreamSynthesisResult> {
+  const setup = resolveTtsRequestSetup({
+    text: params.text,
+    cfg: params.cfg,
+    prefsPath: params.prefsPath,
+    providerOverride: params.overrides?.provider,
+    disableFallback: params.disableFallback,
+  });
+  if ("error" in setup) {
+    return { success: false, error: setup.error };
+  }
+
+  const { config, providers } = setup;
+  const channelId = resolveChannelId(params.channel);
+  const target = channelId && OPUS_CHANNELS.has(channelId) ? "voice-note" : "audio-file";
+  const errors: string[] = [];
+
+  for (const provider of providers) {
+    const providerStart = Date.now();
+    try {
+      const resolvedProvider = resolveReadySpeechProvider({
+        provider,
+        cfg: params.cfg,
+        config,
+        errors,
+      });
+      if (!resolvedProvider) {
+        continue;
+      }
+
+      if (resolvedProvider.synthesizeStream) {
+        const synthesis = await resolvedProvider.synthesizeStream({
+          text: params.text,
+          cfg: params.cfg,
+          config,
+          target,
+          overrides: params.overrides,
+        });
+        return {
+          success: true,
+          audioStream: synthesis.audioStream,
+          latencyMs: Date.now() - providerStart,
+          provider,
+          outputFormat: synthesis.outputFormat,
+          voiceCompatible: synthesis.voiceCompatible,
+          fileExtension: synthesis.fileExtension,
+          abort: synthesis.abort,
+        };
+      }
+
+      const synthesis = await resolvedProvider.synthesize({
+        text: params.text,
+        cfg: params.cfg,
+        config,
+        target,
+        overrides: params.overrides,
+      });
+      return {
+        success: true,
+        audioStream: Readable.from(synthesis.audioBuffer),
         latencyMs: Date.now() - providerStart,
         provider,
         outputFormat: synthesis.outputFormat,

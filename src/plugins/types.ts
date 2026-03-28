@@ -938,6 +938,9 @@ export type SpeechProviderPlugin = {
   voices?: readonly string[];
   isConfigured: (ctx: SpeechProviderConfiguredContext) => boolean;
   synthesize: (req: SpeechSynthesisRequest) => Promise<SpeechSynthesisResult>;
+  synthesizeStream?: (
+    req: import("../tts/provider-types.js").SpeechSynthesisStreamRequest,
+  ) => Promise<import("../tts/provider-types.js").SpeechSynthesisStreamResult>;
   synthesizeTelephony?: (
     req: SpeechTelephonySynthesisRequest,
   ) => Promise<SpeechTelephonySynthesisResult>;
