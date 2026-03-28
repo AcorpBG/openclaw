@@ -819,8 +819,10 @@ describe("tts", () => {
       vi.useFakeTimers();
       const originalFetch = globalThis.fetch;
       let capturedSignal: AbortSignal | undefined;
+      let requestBody: Record<string, unknown> | undefined;
       globalThis.fetch = vi.fn(async (_input, init) => {
         capturedSignal = init?.signal as AbortSignal | undefined;
+        requestBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
         return {
           ok: true,
           body: new ReadableStream({
@@ -844,6 +846,13 @@ describe("tts", () => {
 
         await vi.advanceTimersByTimeAsync(20);
         expect(capturedSignal?.aborted).toBe(false);
+        expect(requestBody).toEqual(
+          expect.objectContaining({
+            response_format: "opus",
+            stream: true,
+            stream_format: "audio",
+          }),
+        );
 
         result.abort();
         expect(capturedSignal?.aborted).toBe(true);

@@ -737,6 +737,7 @@ async function createOpenAITtsResponse(params: {
         input: text,
         voice,
         response_format: responseFormat,
+        ...(streamFormat != null && { stream: true }),
         ...(streamFormat != null && { stream_format: streamFormat }),
         ...(speed != null && { speed }),
         ...(effectiveInstructions != null && { instructions: effectiveInstructions }),
