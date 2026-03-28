@@ -389,7 +389,14 @@ describe("DiscordVoiceManager", () => {
     agentCommandMock.mockResolvedValue({
       payloads: [{ text: "reply from voice" }],
     } as unknown as Awaited<ReturnType<typeof agentCommandMock>>);
+    const abort = vi.fn();
     const manager = createManager();
+    textToSpeechStreamMock.mockResolvedValue({
+      success: true,
+      audioStream: Readable.from(["audio"]),
+      outputFormat: "opus",
+      abort,
+    });
 
     await processVoiceSegment(manager, "u-stream");
 
@@ -402,5 +409,6 @@ describe("DiscordVoiceManager", () => {
       }),
     );
     expect(createAudioResourceMock).toHaveBeenCalledWith(expect.any(Readable));
+    expect(abort).not.toHaveBeenCalled();
   });
 });

@@ -641,7 +641,10 @@ export async function openaiTTS(params: {
   responseFormat: OpenAITtsOutputFormat;
   timeoutMs: number;
 }): Promise<Buffer> {
-  const response = await createOpenAITtsResponse(params);
+  const response = await createOpenAITtsResponse({
+    ...params,
+    clearTimeoutOnResponse: false,
+  });
   try {
     return Buffer.from(await response.response.arrayBuffer());
   } finally {
@@ -660,7 +663,11 @@ export async function openaiTTSStream(params: {
   responseFormat: OpenAITtsOutputFormat;
   timeoutMs: number;
 }): Promise<{ audioStream: Readable; abort: () => void }> {
-  const response = await createOpenAITtsResponse({ ...params, streamFormat: "audio" });
+  const response = await createOpenAITtsResponse({
+    ...params,
+    streamFormat: "audio",
+    clearTimeoutOnResponse: true,
+  });
   const body = response.response.body;
   if (!body) {
     response.dispose();
@@ -684,6 +691,7 @@ async function createOpenAITtsResponse(params: {
   responseFormat: OpenAITtsOutputFormat;
   timeoutMs: number;
   streamFormat?: "audio";
+  clearTimeoutOnResponse: boolean;
 }): Promise<{
   response: Response;
   dispose: () => void;
@@ -699,6 +707,7 @@ async function createOpenAITtsResponse(params: {
     responseFormat,
     timeoutMs,
     streamFormat,
+    clearTimeoutOnResponse,
   } = params;
   const effectiveInstructions = resolveOpenAITtsInstructions(model, instructions);
 
@@ -710,7 +719,11 @@ async function createOpenAITtsResponse(params: {
   }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  const dispose = () => controller.abort();
+  const clearRequestTimeout = () => clearTimeout(timeout);
+  const dispose = () => {
+    clearRequestTimeout();
+    controller.abort();
+  };
 
   try {
     const response = await fetch(`${baseUrl}/audio/speech`, {
@@ -732,21 +745,21 @@ async function createOpenAITtsResponse(params: {
     });
 
     if (!response.ok) {
-      clearTimeout(timeout);
       dispose();
       throw new Error(`OpenAI TTS API error (${response.status})`);
     }
 
-    // The timeout only protects request establishment. Once the response body is
-    // flowing, playback may legitimately last longer than timeoutMs.
-    clearTimeout(timeout);
+    if (clearTimeoutOnResponse) {
+      // Stream playback may legitimately outlive timeoutMs after the body starts.
+      clearRequestTimeout();
+    }
 
     return {
       response,
       dispose,
     };
   } catch (err) {
-    clearTimeout(timeout);
+    clearRequestTimeout();
     throw err;
   }
 }

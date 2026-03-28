@@ -45,6 +45,34 @@ const logVoiceVerbose = (message: string) => {
   logVerbose(`discord voice: ${message}`);
 };
 
+async function waitForAudioPlayerIdle(
+  player: import("@discordjs/voice").AudioPlayer,
+  idleStatus: string,
+): Promise<void> {
+  if (player.state.status === idleStatus) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    const handleStateChange = (_oldState: unknown, newState: { status?: string }) => {
+      if (newState?.status !== idleStatus) {
+        return;
+      }
+      cleanup();
+      resolve();
+    };
+    const handleError = () => {
+      cleanup();
+      resolve();
+    };
+    const cleanup = () => {
+      player.off("stateChange", handleStateChange);
+      player.off("error", handleError);
+    };
+    player.on("stateChange", handleStateChange);
+    player.on("error", handleError);
+  });
+}
+
 type VoiceOperationResult = {
   ok: boolean;
   message: string;
@@ -699,12 +727,9 @@ export class DiscordVoiceManager {
         await voiceSdk
           .entersState(entry.player, voiceSdk.AudioPlayerStatus.Playing, PLAYBACK_READY_TIMEOUT_MS)
           .catch(() => undefined);
-        await voiceSdk
-          .entersState(entry.player, voiceSdk.AudioPlayerStatus.Idle, SPEAKING_READY_TIMEOUT_MS)
-          .catch(() => undefined);
+        await waitForAudioPlayerIdle(entry.player, voiceSdk.AudioPlayerStatus.Idle);
         logVoiceVerbose(`playback done: guild ${entry.guildId} channel ${entry.channelId}`);
       } finally {
-        ttsResult.abort?.();
         if (entry.activePlaybackAbort === ttsResult.abort) {
           entry.activePlaybackAbort = undefined;
         }

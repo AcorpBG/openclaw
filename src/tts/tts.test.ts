@@ -7,7 +7,7 @@ import type { OpenClawConfig } from "../config/config.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
 import { withEnv } from "../test-utils/env.js";
-import { openaiTTSStream } from "./tts-core.js";
+import { openaiTTS, openaiTTSStream } from "./tts-core.js";
 import * as tts from "./tts.js";
 
 let completeSimple: typeof import("@mariozechner/pi-ai").completeSimple;
@@ -777,6 +777,44 @@ describe("tts", () => {
   });
 
   describe("openaiTTSStream timeout lifecycle", () => {
+    it("keeps timeoutMs enforced while buffered audio is still downloading", async () => {
+      vi.useFakeTimers();
+      const originalFetch = globalThis.fetch;
+      let capturedSignal: AbortSignal | undefined;
+      globalThis.fetch = vi.fn(async (_input, init) => {
+        capturedSignal = init?.signal as AbortSignal | undefined;
+        return {
+          ok: true,
+          arrayBuffer: () =>
+            new Promise<ArrayBuffer>((_resolve, reject) => {
+              capturedSignal?.addEventListener("abort", () => reject(new Error("aborted")), {
+                once: true,
+              });
+            }),
+        } as Response;
+      }) as unknown as typeof fetch;
+
+      try {
+        const pending = openaiTTS({
+          text: "hello",
+          apiKey: "test-key",
+          baseUrl: "https://api.openai.com/v1",
+          model: "gpt-4o-mini-tts",
+          voice: "alloy",
+          responseFormat: "mp3",
+          timeoutMs: 10,
+        });
+        const aborted = expect(pending).rejects.toThrow("aborted");
+
+        await vi.advanceTimersByTimeAsync(20);
+        await aborted;
+        expect(capturedSignal?.aborted).toBe(true);
+      } finally {
+        globalThis.fetch = originalFetch;
+        vi.useRealTimers();
+      }
+    });
+
     it("does not abort the response signal after the stream has started", async () => {
       vi.useFakeTimers();
       const originalFetch = globalThis.fetch;
