@@ -1,5 +1,5 @@
 import { rmSync, statSync } from "node:fs";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { completeSimple, type TextContent } from "@mariozechner/pi-ai";
 import { EdgeTTS } from "node-edge-tts";
 import { getApiKeyForModel, requireApiKey } from "../agents/model-auth.js";
@@ -641,10 +641,7 @@ export async function openaiTTS(params: {
   responseFormat: OpenAITtsOutputFormat;
   timeoutMs: number;
 }): Promise<Buffer> {
-  const response = await createOpenAITtsResponse({
-    ...params,
-    clearTimeoutOnResponse: false,
-  });
+  const response = await createOpenAITtsResponse(params);
   try {
     return Buffer.from(await response.response.arrayBuffer());
   } finally {
@@ -663,17 +660,25 @@ export async function openaiTTSStream(params: {
   responseFormat: OpenAITtsOutputFormat;
   timeoutMs: number;
 }): Promise<{ audioStream: Readable; abort: () => void }> {
-  const response = await createOpenAITtsResponse({
-    ...params,
-    streamFormat: "audio",
-    clearTimeoutOnResponse: true,
-  });
+  const response = await createOpenAITtsResponse({ ...params, streamFormat: "audio" });
   const body = response.response.body;
   if (!body) {
     response.dispose();
     throw new Error("OpenAI TTS API returned an empty response body");
   }
-  const audioStream = Readable.fromWeb(body as unknown as Parameters<typeof Readable.fromWeb>[0]);
+  const sourceStream = Readable.fromWeb(body as unknown as Parameters<typeof Readable.fromWeb>[0]);
+  let started = false;
+  const audioStream = sourceStream.pipe(
+    new Transform({
+      transform(chunk, _encoding, callback) {
+        if (!started) {
+          started = true;
+          response.clearRequestTimeout();
+        }
+        callback(null, chunk);
+      },
+    }),
+  );
   return {
     audioStream,
     abort: response.dispose,
@@ -691,10 +696,10 @@ async function createOpenAITtsResponse(params: {
   responseFormat: OpenAITtsOutputFormat;
   timeoutMs: number;
   streamFormat?: "audio";
-  clearTimeoutOnResponse: boolean;
 }): Promise<{
   response: Response;
   dispose: () => void;
+  clearRequestTimeout: () => void;
 }> {
   const {
     text,
@@ -707,7 +712,6 @@ async function createOpenAITtsResponse(params: {
     responseFormat,
     timeoutMs,
     streamFormat,
-    clearTimeoutOnResponse,
   } = params;
   const effectiveInstructions = resolveOpenAITtsInstructions(model, instructions);
 
@@ -750,14 +754,10 @@ async function createOpenAITtsResponse(params: {
       throw new Error(`OpenAI TTS API error (${response.status})`);
     }
 
-    if (clearTimeoutOnResponse) {
-      // Stream playback may legitimately outlive timeoutMs after the body starts.
-      clearRequestTimeout();
-    }
-
     return {
       response,
       dispose,
+      clearRequestTimeout,
     };
   } catch (err) {
     clearRequestTimeout();

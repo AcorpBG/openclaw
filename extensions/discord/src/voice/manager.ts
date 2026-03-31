@@ -47,7 +47,7 @@ const logVoiceVerbose = (message: string) => {
 
 async function waitForAudioPlayerIdle(
   player: import("@discordjs/voice").AudioPlayer,
-  activityStream: Readable,
+  resource: import("@discordjs/voice").AudioResource<unknown>,
   idleStatus: string,
   timeoutMs: number,
 ): Promise<"idle" | "timeout" | "error"> {
@@ -55,17 +55,23 @@ async function waitForAudioPlayerIdle(
     return "idle";
   }
   return await new Promise<"idle" | "timeout" | "error">((resolve) => {
-    let timeout = setTimeout(onTimeout, timeoutMs);
-    timeout.unref?.();
-    function resetTimeout() {
-      clearTimeout(timeout);
-      timeout = setTimeout(onTimeout, timeoutMs);
-      timeout.unref?.();
-    }
-    function onTimeout() {
+    let lastPlaybackDuration = resource.playbackDuration;
+    let stalledMs = 0;
+    const intervalMs = 1_000;
+    const interval = setInterval(() => {
+      if (resource.playbackDuration > lastPlaybackDuration) {
+        lastPlaybackDuration = resource.playbackDuration;
+        stalledMs = 0;
+        return;
+      }
+      stalledMs += intervalMs;
+      if (stalledMs < timeoutMs) {
+        return;
+      }
       cleanup();
       resolve("timeout");
-    }
+    }, intervalMs);
+    interval.unref?.();
     const handleStateChange = (_oldState: unknown, newState: { status?: string }) => {
       if (newState?.status !== idleStatus) {
         return;
@@ -73,24 +79,17 @@ async function waitForAudioPlayerIdle(
       cleanup();
       resolve("idle");
     };
-    const handleData = () => {
-      resetTimeout();
-    };
     const handleError = () => {
       cleanup();
       resolve("error");
     };
     const cleanup = () => {
-      clearTimeout(timeout);
+      clearInterval(interval);
       player.off("stateChange", handleStateChange);
       player.off("error", handleError);
-      activityStream.off("data", handleData);
-      activityStream.off("error", handleError);
     };
     player.on("stateChange", handleStateChange);
     player.on("error", handleError);
-    activityStream.on("data", handleData);
-    activityStream.on("error", handleError);
   });
 }
 
@@ -756,7 +755,7 @@ export class DiscordVoiceManager {
           .catch(() => undefined);
         const playbackResult = await waitForAudioPlayerIdle(
           entry.player,
-          probed.stream,
+          resource,
           voiceSdk.AudioPlayerStatus.Idle,
           SPEAKING_READY_TIMEOUT_MS,
         );

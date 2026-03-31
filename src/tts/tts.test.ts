@@ -843,6 +843,7 @@ describe("tts", () => {
           responseFormat: "opus",
           timeoutMs: 10,
         });
+        result.audioStream.resume();
 
         await vi.advanceTimersByTimeAsync(20);
         expect(capturedSignal?.aborted).toBe(false);
@@ -855,6 +856,41 @@ describe("tts", () => {
         );
 
         result.abort();
+        expect(capturedSignal?.aborted).toBe(true);
+      } finally {
+        globalThis.fetch = originalFetch;
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps timeoutMs active until the first streamed bytes arrive", async () => {
+      vi.useFakeTimers();
+      const originalFetch = globalThis.fetch;
+      let capturedSignal: AbortSignal | undefined;
+      globalThis.fetch = vi.fn(async (_input, init) => {
+        capturedSignal = init?.signal as AbortSignal | undefined;
+        return {
+          ok: true,
+          body: new ReadableStream({
+            start() {},
+          }),
+        } as Response;
+      }) as unknown as typeof fetch;
+
+      try {
+        const result = await openaiTTSStream({
+          text: "hello",
+          apiKey: "test-key",
+          baseUrl: "https://api.openai.com/v1",
+          model: "gpt-4o-mini-tts",
+          voice: "alloy",
+          responseFormat: "opus",
+          timeoutMs: 10,
+        });
+        result.audioStream.on("error", () => {});
+        result.audioStream.resume();
+
+        await vi.advanceTimersByTimeAsync(20);
         expect(capturedSignal?.aborted).toBe(true);
       } finally {
         globalThis.fetch = originalFetch;

@@ -60,7 +60,7 @@ const {
     entersStateMock: vi.fn(async (_target?: unknown, _state?: string, _timeoutMs?: number) => {
       return undefined;
     }),
-    createAudioResourceMock: vi.fn(() => ({ resource: true })),
+    createAudioResourceMock: vi.fn(() => ({ resource: true, playbackDuration: 0 })),
     demuxProbeMock: vi.fn(async (stream: Readable) => ({ stream, type: "ogg/opus" })),
     createAudioPlayerMock: vi.fn(() => ({
       on: vi.fn(),
@@ -171,7 +171,7 @@ describe("DiscordVoiceManager", () => {
     transcribeAudioFileMock.mockReset();
     transcribeAudioFileMock.mockResolvedValue({ text: "hello from voice" });
     createAudioResourceMock.mockReset();
-    createAudioResourceMock.mockReturnValue({ resource: true });
+    createAudioResourceMock.mockReturnValue({ resource: true, playbackDuration: 0 });
     demuxProbeMock.mockReset();
     demuxProbeMock.mockImplementation(async (stream: Readable) => ({ stream, type: "ogg/opus" }));
     textToSpeechStreamMock.mockReset();
@@ -472,5 +472,66 @@ describe("DiscordVoiceManager", () => {
 
     expect(abort).toHaveBeenCalledTimes(1);
     expect(player.stop).toHaveBeenCalledWith(true);
+  });
+
+  it("does not abort healthy long playback that keeps making progress", async () => {
+    vi.useFakeTimers();
+    agentCommandMock.mockResolvedValue({
+      payloads: [{ text: "reply from voice" }],
+    } as unknown as Awaited<ReturnType<typeof agentCommandMock>>);
+    const abort = vi.fn();
+    const manager = createManager();
+    textToSpeechStreamMock.mockResolvedValue({
+      success: true,
+      audioStream: Readable.from(["audio"]),
+      outputFormat: "opus",
+      abort,
+    });
+    const player = createAudioPlayerMock();
+    player.state.status = "playing";
+    const resource = { resource: true, playbackDuration: 0 };
+    createAudioResourceMock.mockReturnValueOnce(resource);
+
+    const entry = {
+      guildId: "g1",
+      channelId: "c1",
+      route: { sessionKey: "discord:g1:c1", agentId: "agent-1" },
+      player,
+      playbackQueue: Promise.resolve(),
+      processingQueue: Promise.resolve(),
+    };
+
+    const processSegment = (
+      manager as unknown as {
+        processSegment: (params: {
+          entry: unknown;
+          wavPath: string;
+          userId: string;
+          durationSeconds: number;
+        }) => Promise<void>;
+      }
+    ).processSegment({
+      entry,
+      wavPath: "/tmp/test.wav",
+      userId: "u-long",
+      durationSeconds: 1.2,
+    });
+
+    await processSegment;
+    const progressTimer = setInterval(() => {
+      resource.playbackDuration += 1_000;
+    }, 1_000);
+    setTimeout(() => {
+      player.state.status = "idle";
+      const stateChange = player.on.mock.calls.find(([event]) => event === "stateChange")?.[1];
+      stateChange?.({ status: "playing" }, { status: "idle" });
+    }, 70_000);
+
+    await vi.advanceTimersByTimeAsync(70_000);
+    clearInterval(progressTimer);
+    await (entry.playbackQueue as Promise<void>);
+
+    expect(abort).not.toHaveBeenCalled();
+    expect(player.stop).not.toHaveBeenCalledWith(true);
   });
 });
