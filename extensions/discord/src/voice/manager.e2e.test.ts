@@ -8,6 +8,7 @@ const {
   entersStateMock,
   createAudioPlayerMock,
   createAudioResourceMock,
+  demuxProbeMock,
   resolveAgentRouteMock,
   agentCommandMock,
   transcribeAudioFileMock,
@@ -60,6 +61,7 @@ const {
       return undefined;
     }),
     createAudioResourceMock: vi.fn(() => ({ resource: true })),
+    demuxProbeMock: vi.fn(async (stream: Readable) => ({ stream, type: "ogg/opus" })),
     createAudioPlayerMock: vi.fn(() => ({
       on: vi.fn(),
       off: vi.fn(),
@@ -92,8 +94,10 @@ vi.mock("./sdk-runtime.js", () => ({
     },
     createAudioPlayer: createAudioPlayerMock,
     createAudioResource: createAudioResourceMock,
+    demuxProbe: demuxProbeMock,
     entersState: entersStateMock,
     joinVoiceChannel: joinVoiceChannelMock,
+    StreamType: { Arbitrary: "arbitrary" },
   }),
 }));
 
@@ -164,6 +168,8 @@ describe("DiscordVoiceManager", () => {
     transcribeAudioFileMock.mockResolvedValue({ text: "hello from voice" });
     createAudioResourceMock.mockReset();
     createAudioResourceMock.mockReturnValue({ resource: true });
+    demuxProbeMock.mockReset();
+    demuxProbeMock.mockImplementation(async (stream: Readable) => ({ stream, type: "ogg/opus" }));
     textToSpeechStreamMock.mockReset();
     textToSpeechStreamMock.mockResolvedValue({
       success: true,
@@ -408,7 +414,10 @@ describe("DiscordVoiceManager", () => {
         }),
       }),
     );
-    expect(createAudioResourceMock).toHaveBeenCalledWith(expect.any(Readable));
+    expect(demuxProbeMock).toHaveBeenCalledWith(expect.any(Readable));
+    expect(createAudioResourceMock).toHaveBeenCalledWith(expect.any(Readable), {
+      inputType: "ogg/opus",
+    });
     expect(abort).not.toHaveBeenCalled();
   });
 });

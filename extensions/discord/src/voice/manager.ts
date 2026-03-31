@@ -722,7 +722,13 @@ export class DiscordVoiceManager {
       );
       const voiceSdk = loadDiscordVoiceSdk();
       try {
-        const resource = voiceSdk.createAudioResource(audioStream);
+        const probed =
+          ttsResult.outputFormat === "opus"
+            ? await voiceSdk.demuxProbe(audioStream)
+            : { stream: audioStream, type: voiceSdk.StreamType.Arbitrary };
+        const resource = voiceSdk.createAudioResource(probed.stream, {
+          inputType: probed.type,
+        });
         entry.player.play(resource);
         await voiceSdk
           .entersState(entry.player, voiceSdk.AudioPlayerStatus.Playing, PLAYBACK_READY_TIMEOUT_MS)
