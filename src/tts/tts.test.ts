@@ -888,6 +888,62 @@ describe("tts", () => {
     });
   });
 
+  describe("stream synthesis fallback", () => {
+    it("wraps buffered fallback audio as a byte stream instead of object mode", async () => {
+      const registry = createEmptyPluginRegistry();
+      registry.speechProviders = [
+        {
+          pluginId: "buffered",
+          source: "test",
+          provider: {
+            id: "buffered",
+            label: "Buffered",
+            isConfigured: () => true,
+            synthesize: async () => ({
+              audioBuffer: Buffer.from([1, 2, 3]),
+              outputFormat: "mp3",
+              fileExtension: ".mp3",
+              voiceCompatible: false,
+            }),
+          },
+        },
+      ];
+      setActivePluginRegistry(registry, "tts-buffered-stream-test");
+
+      const result = await tts.synthesizeSpeechStream({
+        text: "Hello",
+        cfg: {
+          agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+          messages: { tts: { provider: "buffered" } },
+        },
+        disableFallback: true,
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.audioStream?.readableObjectMode).toBe(false);
+      const chunks: Buffer[] = [];
+      for await (const chunk of result.audioStream!) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      expect(Buffer.concat(chunks)).toEqual(Buffer.from([1, 2, 3]));
+    });
+  });
+
+  describe("openai provider metadata", () => {
+    it("does not advertise fixed model or voice lists for custom endpoints", async () => {
+      const provider = buildOpenAISpeechProvider();
+
+      expect(provider.models).toBeUndefined();
+      expect(provider.voices).toBeUndefined();
+      await expect(provider.listVoices?.({ baseUrl: "http://localhost:8880/v1" })).resolves.toEqual(
+        [],
+      );
+      await expect(provider.listVoices?.({})).resolves.toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: "alloy" })]),
+      );
+    });
+  });
+
   describe("maybeApplyTtsToPayload", () => {
     const baseCfg: OpenClawConfig = {
       agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },

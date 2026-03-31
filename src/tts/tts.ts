@@ -667,6 +667,16 @@ function resolveTtsRequestSetup(params: {
   };
 }
 
+function createByteReadable(buffer: Buffer): Readable {
+  const stream = new Readable({
+    read() {
+      this.push(buffer);
+      this.push(null);
+    },
+  });
+  return stream;
+}
+
 export async function textToSpeech(params: {
   text: string;
   cfg: OpenClawConfig;
@@ -835,7 +845,7 @@ export async function synthesizeSpeechStream(params: {
       });
       return {
         success: true,
-        audioStream: Readable.from(synthesis.audioBuffer),
+        audioStream: createByteReadable(synthesis.audioBuffer),
         latencyMs: Date.now() - providerStart,
         provider,
         outputFormat: synthesis.outputFormat,

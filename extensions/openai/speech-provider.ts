@@ -1,6 +1,5 @@
 import type { SpeechProviderPlugin } from "openclaw/plugin-sdk/core";
 import {
-  OPENAI_TTS_MODELS,
   OPENAI_TTS_OUTPUT_FORMATS,
   OPENAI_TTS_VOICES,
   openaiTTS,
@@ -9,6 +8,19 @@ import {
 
 type OpenAIOutputFormat = (typeof OPENAI_TTS_OUTPUT_FORMATS)[number];
 type OpenAIFileOutputFormat = Exclude<OpenAIOutputFormat, "pcm">;
+const DEFAULT_OPENAI_TTS_BASE_URL = "https://api.openai.com/v1";
+
+function normalizeOpenAITtsBaseUrl(baseUrl?: string): string {
+  const trimmed = baseUrl?.trim();
+  if (!trimmed) {
+    return DEFAULT_OPENAI_TTS_BASE_URL;
+  }
+  return trimmed.replace(/\/+$/, "");
+}
+
+function usesDefaultOpenAITtsMetadata(baseUrl?: string): boolean {
+  return normalizeOpenAITtsBaseUrl(baseUrl) === DEFAULT_OPENAI_TTS_BASE_URL;
+}
 
 function resolveSynthesisFormat(
   req: Parameters<SpeechProviderPlugin["synthesize"]>[0],
@@ -61,9 +73,13 @@ export function buildOpenAISpeechProvider(): SpeechProviderPlugin {
   return {
     id: "openai",
     label: "OpenAI",
-    models: OPENAI_TTS_MODELS,
-    voices: OPENAI_TTS_VOICES,
-    listVoices: async () => OPENAI_TTS_VOICES.map((voice) => ({ id: voice, name: voice })),
+    listVoices: async (req) => {
+      const baseUrl = req.baseUrl ?? req.config?.openai.baseUrl;
+      if (!usesDefaultOpenAITtsMetadata(baseUrl)) {
+        return [];
+      }
+      return OPENAI_TTS_VOICES.map((voice) => ({ id: voice, name: voice }));
+    },
     isConfigured: ({ config }) => Boolean(config.openai.apiKey || process.env.OPENAI_API_KEY),
     synthesize: async (req) => {
       const apiKey = req.config.openai.apiKey || process.env.OPENAI_API_KEY;
