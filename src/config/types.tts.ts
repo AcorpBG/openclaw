@@ -6,7 +6,7 @@ export type TtsMode = "final" | "all";
 
 export type TtsAutoMode = "off" | "always" | "inbound" | "tagged";
 
-export type OpenAITtsOutputFormat = "wav" | "opus" | "mp3" | "aac" | "pcm";
+export type OpenAITtsOutputFormat = "wav" | "opus" | "mp3" | "aac";
 
 export type TtsModelOverrideConfig = {
   /** Enable model-provided overrides for TTS. */

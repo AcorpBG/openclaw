@@ -25,6 +25,7 @@ import type {
   TtsModelOverrideConfig,
 } from "../config/types.tts.js";
 import { logVerbose } from "../globals.js";
+import { formatErrorMessage } from "../infra/errors.js";
 import { resolvePreferredOpenClawTmpDir } from "../infra/tmp-openclaw-dir.js";
 import {
   OPENAI_DEFAULT_TTS_MODEL as DEFAULT_OPENAI_MODEL,
@@ -817,23 +818,49 @@ export async function synthesizeSpeechStream(params: {
       }
 
       if (resolvedProvider.synthesizeStream) {
-        const synthesis = await resolvedProvider.synthesizeStream({
-          text: params.text,
-          cfg: params.cfg,
-          config,
-          target,
-          overrides: params.overrides,
-        });
-        return {
-          success: true,
-          audioStream: synthesis.audioStream,
-          latencyMs: Date.now() - providerStart,
-          provider,
-          outputFormat: synthesis.outputFormat,
-          voiceCompatible: synthesis.voiceCompatible,
-          fileExtension: synthesis.fileExtension,
-          abort: synthesis.abort,
-        };
+        try {
+          const synthesis = await resolvedProvider.synthesizeStream({
+            text: params.text,
+            cfg: params.cfg,
+            config,
+            target,
+            overrides: params.overrides,
+          });
+          return {
+            success: true,
+            audioStream: synthesis.audioStream,
+            latencyMs: Date.now() - providerStart,
+            provider,
+            outputFormat: synthesis.outputFormat,
+            voiceCompatible: synthesis.voiceCompatible,
+            fileExtension: synthesis.fileExtension,
+            abort: synthesis.abort,
+          };
+        } catch (streamErr) {
+          try {
+            const synthesis = await resolvedProvider.synthesize({
+              text: params.text,
+              cfg: params.cfg,
+              config,
+              target,
+              overrides: params.overrides,
+            });
+            return {
+              success: true,
+              audioStream: createByteReadable(synthesis.audioBuffer),
+              latencyMs: Date.now() - providerStart,
+              provider,
+              outputFormat: synthesis.outputFormat,
+              voiceCompatible: synthesis.voiceCompatible,
+              fileExtension: synthesis.fileExtension,
+            };
+          } catch (bufferedErr) {
+            errors.push(
+              `${provider}: stream fallback failed (${formatErrorMessage(streamErr)}); buffered synthesis failed (${formatErrorMessage(bufferedErr)})`,
+            );
+            continue;
+          }
+        }
       }
 
       const synthesis = await resolvedProvider.synthesize({

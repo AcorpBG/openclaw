@@ -4007,7 +4007,7 @@
 {"recordType":"path","path":"messages.tts.openai.baseUrl","kind":"core","type":"string","required":false,"deprecated":false,"sensitive":false,"tags":[],"hasChildren":false}
 {"recordType":"path","path":"messages.tts.openai.instructions","kind":"core","type":"string","required":false,"deprecated":false,"sensitive":false,"tags":[],"hasChildren":false}
 {"recordType":"path","path":"messages.tts.openai.model","kind":"core","type":"string","required":false,"deprecated":false,"sensitive":false,"tags":[],"hasChildren":false}
-{"recordType":"path","path":"messages.tts.openai.responseFormat","kind":"core","type":"string","required":false,"enumValues":["wav","opus","mp3","aac","pcm"],"deprecated":false,"sensitive":false,"tags":[],"hasChildren":false}
+{"recordType":"path","path":"messages.tts.openai.responseFormat","kind":"core","type":"string","required":false,"enumValues":["wav","opus","mp3","aac"],"deprecated":false,"sensitive":false,"tags":[],"hasChildren":false}
 {"recordType":"path","path":"messages.tts.openai.speed","kind":"core","type":"number","required":false,"deprecated":false,"sensitive":false,"tags":[],"hasChildren":false}
 {"recordType":"path","path":"messages.tts.openai.voice","kind":"core","type":"string","required":false,"deprecated":false,"sensitive":false,"tags":[],"hasChildren":false}
 {"recordType":"path","path":"messages.tts.prefsPath","kind":"core","type":"string","required":false,"deprecated":false,"sensitive":false,"tags":[],"hasChildren":false}

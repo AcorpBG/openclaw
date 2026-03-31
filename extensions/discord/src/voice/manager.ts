@@ -47,6 +47,7 @@ const logVoiceVerbose = (message: string) => {
 
 async function waitForAudioPlayerIdle(
   player: import("@discordjs/voice").AudioPlayer,
+  activityStream: Readable,
   idleStatus: string,
   timeoutMs: number,
 ): Promise<"idle" | "timeout" | "error"> {
@@ -54,17 +55,26 @@ async function waitForAudioPlayerIdle(
     return "idle";
   }
   return await new Promise<"idle" | "timeout" | "error">((resolve) => {
-    const timeout = setTimeout(() => {
+    let timeout = setTimeout(onTimeout, timeoutMs);
+    timeout.unref?.();
+    function resetTimeout() {
+      clearTimeout(timeout);
+      timeout = setTimeout(onTimeout, timeoutMs);
+      timeout.unref?.();
+    }
+    function onTimeout() {
       cleanup();
       resolve("timeout");
-    }, timeoutMs);
-    timeout.unref?.();
+    }
     const handleStateChange = (_oldState: unknown, newState: { status?: string }) => {
       if (newState?.status !== idleStatus) {
         return;
       }
       cleanup();
       resolve("idle");
+    };
+    const handleData = () => {
+      resetTimeout();
     };
     const handleError = () => {
       cleanup();
@@ -74,9 +84,13 @@ async function waitForAudioPlayerIdle(
       clearTimeout(timeout);
       player.off("stateChange", handleStateChange);
       player.off("error", handleError);
+      activityStream.off("data", handleData);
+      activityStream.off("error", handleError);
     };
     player.on("stateChange", handleStateChange);
     player.on("error", handleError);
+    activityStream.on("data", handleData);
+    activityStream.on("error", handleError);
   });
 }
 
@@ -742,12 +756,13 @@ export class DiscordVoiceManager {
           .catch(() => undefined);
         const playbackResult = await waitForAudioPlayerIdle(
           entry.player,
+          probed.stream,
           voiceSdk.AudioPlayerStatus.Idle,
           SPEAKING_READY_TIMEOUT_MS,
         );
         if (playbackResult === "timeout") {
           logger.warn(
-            `discord voice: playback idle wait timed out after ${SPEAKING_READY_TIMEOUT_MS}ms; aborting stalled TTS for guild ${entry.guildId} channel ${entry.channelId}`,
+            `discord voice: playback stalled for ${SPEAKING_READY_TIMEOUT_MS}ms; aborting TTS for guild ${entry.guildId} channel ${entry.channelId}`,
           );
           ttsResult.abort?.();
           entry.player.stop(true);

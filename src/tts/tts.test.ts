@@ -879,7 +879,7 @@ describe("tts", () => {
               },
             },
           },
-        },
+        } as unknown as OpenClawConfig,
         disableFallback: true,
       });
 
@@ -926,6 +926,49 @@ describe("tts", () => {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
       }
       expect(Buffer.concat(chunks)).toEqual(Buffer.from([1, 2, 3]));
+    });
+
+    it("retries the same provider with buffered synthesis when stream synthesis throws", async () => {
+      const synthesize = vi.fn(async () => ({
+        audioBuffer: Buffer.from([4, 5, 6]),
+        outputFormat: "mp3",
+        fileExtension: ".mp3",
+        voiceCompatible: false,
+      }));
+      const registry = createEmptyPluginRegistry();
+      registry.speechProviders = [
+        {
+          pluginId: "buffered-fallback",
+          source: "test",
+          provider: {
+            id: "buffered-fallback",
+            label: "Buffered Fallback",
+            isConfigured: () => true,
+            synthesize,
+            synthesizeStream: vi.fn(async () => {
+              throw new Error("stream unsupported");
+            }),
+          },
+        },
+      ];
+      setActivePluginRegistry(registry, "tts-stream-fallback-test");
+
+      const result = await tts.synthesizeSpeechStream({
+        text: "Hello",
+        cfg: {
+          agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+          messages: { tts: { provider: "buffered-fallback" } },
+        },
+        disableFallback: true,
+      });
+
+      expect(result.success).toBe(true);
+      expect(synthesize).toHaveBeenCalledTimes(1);
+      const chunks: Buffer[] = [];
+      for await (const chunk of result.audioStream!) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      expect(Buffer.concat(chunks)).toEqual(Buffer.from([4, 5, 6]));
     });
   });
 
