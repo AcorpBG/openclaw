@@ -48,23 +48,30 @@ const logVoiceVerbose = (message: string) => {
 async function waitForAudioPlayerIdle(
   player: import("@discordjs/voice").AudioPlayer,
   idleStatus: string,
-): Promise<void> {
+  timeoutMs: number,
+): Promise<"idle" | "timeout" | "error"> {
   if (player.state.status === idleStatus) {
-    return;
+    return "idle";
   }
-  await new Promise<void>((resolve) => {
+  return await new Promise<"idle" | "timeout" | "error">((resolve) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve("timeout");
+    }, timeoutMs);
+    timeout.unref?.();
     const handleStateChange = (_oldState: unknown, newState: { status?: string }) => {
       if (newState?.status !== idleStatus) {
         return;
       }
       cleanup();
-      resolve();
+      resolve("idle");
     };
     const handleError = () => {
       cleanup();
-      resolve();
+      resolve("error");
     };
     const cleanup = () => {
+      clearTimeout(timeout);
       player.off("stateChange", handleStateChange);
       player.off("error", handleError);
     };
@@ -733,7 +740,18 @@ export class DiscordVoiceManager {
         await voiceSdk
           .entersState(entry.player, voiceSdk.AudioPlayerStatus.Playing, PLAYBACK_READY_TIMEOUT_MS)
           .catch(() => undefined);
-        await waitForAudioPlayerIdle(entry.player, voiceSdk.AudioPlayerStatus.Idle);
+        const playbackResult = await waitForAudioPlayerIdle(
+          entry.player,
+          voiceSdk.AudioPlayerStatus.Idle,
+          SPEAKING_READY_TIMEOUT_MS,
+        );
+        if (playbackResult === "timeout") {
+          logger.warn(
+            `discord voice: playback idle wait timed out after ${SPEAKING_READY_TIMEOUT_MS}ms; aborting stalled TTS for guild ${entry.guildId} channel ${entry.channelId}`,
+          );
+          ttsResult.abort?.();
+          entry.player.stop(true);
+        }
         logVoiceVerbose(`playback done: guild ${entry.guildId} channel ${entry.channelId}`);
       } finally {
         if (entry.activePlaybackAbort === ttsResult.abort) {

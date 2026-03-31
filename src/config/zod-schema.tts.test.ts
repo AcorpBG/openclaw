@@ -53,4 +53,14 @@ describe("TtsConfigSchema openai speed and instructions", () => {
       }),
     ).toThrow();
   });
+
+  it("rejects pcm as a regular OpenAI TTS response format", () => {
+    expect(() =>
+      TtsConfigSchema.parse({
+        openai: {
+          responseFormat: "pcm",
+        },
+      }),
+    ).toThrow();
+  });
 });

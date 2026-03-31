@@ -930,13 +930,13 @@ describe("tts", () => {
   });
 
   describe("openai provider metadata", () => {
-    it("does not advertise fixed model or voice lists for custom endpoints", async () => {
+    it("keeps voice listing available for custom endpoints while omitting fixed metadata fields", async () => {
       const provider = buildOpenAISpeechProvider();
 
       expect(provider.models).toBeUndefined();
       expect(provider.voices).toBeUndefined();
       await expect(provider.listVoices?.({ baseUrl: "http://localhost:8880/v1" })).resolves.toEqual(
-        [],
+        expect.arrayContaining([expect.objectContaining({ id: "alloy" })]),
       );
       await expect(provider.listVoices?.({})).resolves.toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "alloy" })]),

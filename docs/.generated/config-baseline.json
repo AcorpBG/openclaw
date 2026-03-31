@@ -12209,8 +12209,7 @@
         "wav",
         "opus",
         "mp3",
-        "aac",
-        "pcm"
+        "aac"
       ],
       "deprecated": false,
       "sensitive": false,
@@ -15310,8 +15309,7 @@
         "wav",
         "opus",
         "mp3",
-        "aac",
-        "pcm"
+        "aac"
       ],
       "deprecated": false,
       "sensitive": false,

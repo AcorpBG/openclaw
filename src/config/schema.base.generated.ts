@@ -8397,7 +8397,7 @@ export const GENERATED_BASE_CONFIG_SCHEMA = {
                   },
                   responseFormat: {
                     type: "string",
-                    enum: ["wav", "opus", "mp3", "aac", "pcm"],
+                    enum: ["wav", "opus", "mp3", "aac"],
                   },
                   speed: {
                     type: "number",

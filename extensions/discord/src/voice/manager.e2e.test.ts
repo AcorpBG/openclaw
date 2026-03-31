@@ -1,6 +1,6 @@
 import { Readable } from "node:stream";
 import { ChannelType } from "@buape/carbon";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   createConnectionMock,
@@ -153,6 +153,10 @@ function createRuntime() {
 describe("DiscordVoiceManager", () => {
   beforeAll(async () => {
     managerModule = await import("./manager.js");
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   beforeEach(() => {
@@ -419,5 +423,54 @@ describe("DiscordVoiceManager", () => {
       inputType: "ogg/opus",
     });
     expect(abort).not.toHaveBeenCalled();
+  });
+
+  it("aborts stalled playback after the idle timeout", async () => {
+    vi.useFakeTimers();
+    agentCommandMock.mockResolvedValue({
+      payloads: [{ text: "reply from voice" }],
+    } as unknown as Awaited<ReturnType<typeof agentCommandMock>>);
+    const abort = vi.fn();
+    const manager = createManager();
+    textToSpeechStreamMock.mockResolvedValue({
+      success: true,
+      audioStream: Readable.from(["audio"]),
+      outputFormat: "opus",
+      abort,
+    });
+    const player = createAudioPlayerMock();
+    player.state.status = "playing";
+
+    const entry = {
+      guildId: "g1",
+      channelId: "c1",
+      route: { sessionKey: "discord:g1:c1", agentId: "agent-1" },
+      player,
+      playbackQueue: Promise.resolve(),
+      processingQueue: Promise.resolve(),
+    };
+
+    const processSegment = (
+      manager as unknown as {
+        processSegment: (params: {
+          entry: unknown;
+          wavPath: string;
+          userId: string;
+          durationSeconds: number;
+        }) => Promise<void>;
+      }
+    ).processSegment({
+      entry,
+      wavPath: "/tmp/test.wav",
+      userId: "u-timeout",
+      durationSeconds: 1.2,
+    });
+
+    await processSegment;
+    await vi.advanceTimersByTimeAsync(60_000);
+    await (entry.playbackQueue as Promise<void>);
+
+    expect(abort).toHaveBeenCalledTimes(1);
+    expect(player.stop).toHaveBeenCalledWith(true);
   });
 });
