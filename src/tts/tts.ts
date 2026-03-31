@@ -694,8 +694,10 @@ async function primeAudioStream(params: {
       abort?.();
       const err = new Error("TTS stream timed out before audio started");
       cleanup();
-      audioStream.destroy(err);
       reject(err);
+      queueMicrotask(() => {
+        audioStream.destroy(err);
+      });
     }, timeoutMs);
     timeout.unref?.();
 
