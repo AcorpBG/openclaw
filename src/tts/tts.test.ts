@@ -1011,6 +1011,7 @@ describe("tts", () => {
     });
 
     it("retries the same provider with buffered synthesis when the stream fails before the first chunk", async () => {
+      const abort = vi.fn();
       const synthesize = vi.fn(async () => ({
         audioBuffer: Buffer.from([7, 8, 9]),
         outputFormat: "mp3",
@@ -1038,6 +1039,7 @@ describe("tts", () => {
                 outputFormat: "mp3",
                 fileExtension: ".mp3",
                 voiceCompatible: false,
+                abort,
               };
             }),
           },
@@ -1055,6 +1057,7 @@ describe("tts", () => {
       });
 
       expect(result.success).toBe(true);
+      expect(abort).toHaveBeenCalledTimes(1);
       expect(synthesize).toHaveBeenCalledTimes(1);
       const chunks: Buffer[] = [];
       for await (const chunk of result.audioStream!) {

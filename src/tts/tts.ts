@@ -872,6 +872,7 @@ export async function synthesizeSpeechStream(params: {
       }
 
       if (resolvedProvider.synthesizeStream) {
+        let streamAbort: (() => void) | undefined;
         try {
           const synthesis = await resolvedProvider.synthesizeStream({
             text: params.text,
@@ -880,10 +881,11 @@ export async function synthesizeSpeechStream(params: {
             target,
             overrides: params.overrides,
           });
+          streamAbort = synthesis.abort;
           const primedStream = await primeAudioStream({
             audioStream: synthesis.audioStream,
             timeoutMs: config.timeoutMs,
-            abort: synthesis.abort,
+            abort: streamAbort,
           });
           return {
             success: true,
@@ -893,9 +895,14 @@ export async function synthesizeSpeechStream(params: {
             outputFormat: synthesis.outputFormat,
             voiceCompatible: synthesis.voiceCompatible,
             fileExtension: synthesis.fileExtension,
-            abort: synthesis.abort,
+            abort: streamAbort,
           };
         } catch (streamErr) {
+          try {
+            streamAbort?.();
+          } catch {
+            // Ignore stream cleanup failures and continue to buffered fallback.
+          }
           try {
             const synthesis = await resolvedProvider.synthesize({
               text: params.text,
