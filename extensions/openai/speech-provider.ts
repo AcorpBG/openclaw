@@ -12,6 +12,9 @@ type OpenAIFileOutputFormat = Exclude<OpenAIOutputFormat, "pcm">;
 function resolveSynthesisFormat(
   req: Parameters<SpeechProviderPlugin["synthesize"]>[0],
 ): OpenAIFileOutputFormat {
+  if (req.target === "voice-note") {
+    return "opus";
+  }
   const override = req.overrides?.openai?.outputFormat;
   if (override) {
     return assertFileSynthesisFormat(override);
@@ -20,7 +23,7 @@ function resolveSynthesisFormat(
   if (configured) {
     return assertFileSynthesisFormat(configured);
   }
-  return req.target === "voice-note" ? "opus" : "mp3";
+  return "mp3";
 }
 
 function assertFileSynthesisFormat(format: OpenAIOutputFormat): OpenAIFileOutputFormat {

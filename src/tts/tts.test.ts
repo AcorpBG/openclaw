@@ -1,3 +1,4 @@
+import { Readable } from "node:stream";
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { buildElevenLabsSpeechProvider } from "../../extensions/elevenlabs/speech-provider.ts";
@@ -759,7 +760,9 @@ describe("tts", () => {
 
         expect(result.success).toBe(true);
         expect(fetchMock).toHaveBeenCalledTimes(1);
-        const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+        const call = fetchMock.mock.calls[0];
+        expect(call).toBeDefined();
+        const [, init] = call as unknown as [string, RequestInit];
         expect(typeof init.body).toBe("string");
         const body = JSON.parse(init.body as string) as Record<string, unknown>;
         expect(body.instructions).toBe(expectedInstructions);
@@ -1006,6 +1009,59 @@ describe("tts", () => {
       }
       expect(Buffer.concat(chunks)).toEqual(Buffer.from([4, 5, 6]));
     });
+
+    it("retries the same provider with buffered synthesis when the stream fails before the first chunk", async () => {
+      const synthesize = vi.fn(async () => ({
+        audioBuffer: Buffer.from([7, 8, 9]),
+        outputFormat: "mp3",
+        fileExtension: ".mp3",
+        voiceCompatible: false,
+      }));
+      const registry = createEmptyPluginRegistry();
+      registry.speechProviders = [
+        {
+          pluginId: "primed-fallback",
+          source: "test",
+          provider: {
+            id: "primed-fallback",
+            label: "Primed Fallback",
+            isConfigured: () => true,
+            synthesize,
+            synthesizeStream: vi.fn(async () => {
+              const stream = new Readable({
+                read() {
+                  this.destroy(new Error("stream reset"));
+                },
+              });
+              return {
+                audioStream: stream,
+                outputFormat: "mp3",
+                fileExtension: ".mp3",
+                voiceCompatible: false,
+              };
+            }),
+          },
+        },
+      ];
+      setActivePluginRegistry(registry, "tts-stream-prime-fallback-test");
+
+      const result = await tts.synthesizeSpeechStream({
+        text: "Hello",
+        cfg: {
+          agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+          messages: { tts: { provider: "primed-fallback" } },
+        },
+        disableFallback: true,
+      });
+
+      expect(result.success).toBe(true);
+      expect(synthesize).toHaveBeenCalledTimes(1);
+      const chunks: Buffer[] = [];
+      for await (const chunk of result.audioStream!) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      expect(Buffer.concat(chunks)).toEqual(Buffer.from([7, 8, 9]));
+    });
   });
 
   describe("openai provider metadata", () => {
@@ -1020,6 +1076,61 @@ describe("tts", () => {
       await expect(provider.listVoices?.({})).resolves.toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "alloy" })]),
       );
+    });
+
+    it("forces opus for voice-note synthesis even when responseFormat is configured", async () => {
+      const originalFetch = globalThis.fetch;
+      const fetchMock = vi.fn(async () => ({
+        ok: true,
+        arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+      }));
+      globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+      try {
+        const provider = buildOpenAISpeechProvider();
+        const result = await provider.synthesize({
+          text: "hello",
+          cfg: {
+            agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+            messages: {
+              tts: {
+                provider: "openai",
+                openai: {
+                  apiKey: "test-key",
+                  model: "gpt-4o-mini-tts",
+                  voice: "alloy",
+                  responseFormat: "mp3",
+                },
+              },
+            },
+          },
+          config: resolveTtsConfig({
+            agents: { defaults: { model: { primary: "openai/gpt-4o-mini" } } },
+            messages: {
+              tts: {
+                provider: "openai",
+                openai: {
+                  apiKey: "test-key",
+                  model: "gpt-4o-mini-tts",
+                  voice: "alloy",
+                  responseFormat: "mp3",
+                },
+              },
+            },
+          }),
+          target: "voice-note",
+        });
+
+        const call = (fetchMock.mock.calls as unknown[][])[0] ?? [];
+        const init = (call[1] ?? {}) as RequestInit;
+        const body =
+          typeof init.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+        expect(body.response_format).toBe("opus");
+        expect(result.outputFormat).toBe("opus");
+        expect(result.voiceCompatible).toBe(true);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
     });
   });
 

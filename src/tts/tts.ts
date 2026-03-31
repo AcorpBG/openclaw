@@ -9,7 +9,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import path from "node:path";
-import { Readable } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
 import type { ReplyPayload } from "../auto-reply/types.js";
 import { normalizeChannelId } from "../channels/plugins/index.js";
@@ -678,6 +678,58 @@ function createByteReadable(buffer: Buffer): Readable {
   return stream;
 }
 
+async function primeAudioStream(params: {
+  audioStream: Readable;
+  timeoutMs: number;
+  abort?: () => void;
+}): Promise<Readable> {
+  const { audioStream, timeoutMs, abort } = params;
+  const output = new PassThrough();
+  const propagateError = (err: unknown) => {
+    output.destroy(err instanceof Error ? err : new Error(String(err)));
+  };
+
+  return await new Promise<Readable>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      abort?.();
+      const err = new Error("TTS stream timed out before audio started");
+      cleanup();
+      audioStream.destroy(err);
+      reject(err);
+    }, timeoutMs);
+    timeout.unref?.();
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      audioStream.off("data", handleData);
+      audioStream.off("error", handleError);
+      audioStream.off("end", handleEnd);
+    };
+
+    const handleData = (firstChunk: Buffer) => {
+      cleanup();
+      output.write(firstChunk);
+      audioStream.on("error", propagateError);
+      audioStream.pipe(output);
+      resolve(output);
+    };
+
+    const handleError = (err: unknown) => {
+      cleanup();
+      reject(err);
+    };
+
+    const handleEnd = () => {
+      cleanup();
+      reject(new Error("TTS stream ended before audio started"));
+    };
+
+    audioStream.once("data", handleData);
+    audioStream.once("error", handleError);
+    audioStream.once("end", handleEnd);
+  });
+}
+
 export async function textToSpeech(params: {
   text: string;
   cfg: OpenClawConfig;
@@ -826,9 +878,14 @@ export async function synthesizeSpeechStream(params: {
             target,
             overrides: params.overrides,
           });
+          const primedStream = await primeAudioStream({
+            audioStream: synthesis.audioStream,
+            timeoutMs: config.timeoutMs,
+            abort: synthesis.abort,
+          });
           return {
             success: true,
-            audioStream: synthesis.audioStream,
+            audioStream: primedStream,
             latencyMs: Date.now() - providerStart,
             provider,
             outputFormat: synthesis.outputFormat,
